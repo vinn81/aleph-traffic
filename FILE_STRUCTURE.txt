@@ -1,0 +1,12 @@
+dalgubeol-now-final/
+├── api/
+│   └── index.py
+├── index.html
+├── pyproject.toml
+├── vercel.json
+├── schema.sql
+├── .env.example
+├── .gitignore
+├── DEPLOY_CHECKLIST.md
+├── FILE_STRUCTURE.txt
+└── README.md

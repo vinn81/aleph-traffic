@@ -1,0 +1,9 @@
+[project]
+name = "dalgubeol-now"
+version = "3.0.0"
+description = "Daily Dalgubeol-daero traffic dashboard using ITS, Vercel Cron and Neon"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.141.1",
+  "psycopg[binary]>=3.2.0"
+]

@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="대구 달구벌대로의 실제 교통 데이터를 하루 한 번 기록하고 전날과 비교하는 정보판">
+<title>달구벌 NOW</title>
+<style>
+:root{
+  --bg:#f4f7fb;--card:#fff;--text:#172033;--muted:#6b7280;--line:#e5e7eb;
+  --blue:#2563eb;--green:#15803d;--yellow:#b45309;--red:#b91c1c;--purple:#6d28d9;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;font-family:Pretendard,"Noto Sans KR",system-ui,-apple-system,sans-serif;
+  color:var(--text);background:linear-gradient(180deg,#eaf2ff 0,#f7f9fc 330px,#f4f7fb 100%);
+}
+.wrap{max-width:1120px;margin:auto;padding:30px 18px 60px}
+.header{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:20px}
+h1{font-size:32px;letter-spacing:-1.2px;margin:0}.subtitle{margin-top:7px;color:var(--muted);font-size:14px}
+.badge{display:inline-flex;align-items:center;gap:8px;border:1px solid;border-radius:999px;padding:10px 14px;font-size:13px;font-weight:850;white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%}
+.normal{background:#ecfdf3;color:#166534;border-color:#bbf7d0}.normal .dot{background:var(--green)}
+.delayed{background:#fffbeb;color:#92400e;border-color:#fde68a}.delayed .dot{background:#f59e0b}
+.error{background:#fef2f2;color:#991b1b;border-color:#fecaca}.error .dot{background:var(--red)}
+.waiting{background:#eff6ff;color:#1e40af;border-color:#bfdbfe}.waiting .dot{background:var(--blue)}
+.setup{background:#f5f3ff;color:#5b21b6;border-color:#ddd6fe}.setup .dot{background:var(--purple)}
+.grid{display:grid;grid-template-columns:1.25fr .75fr;gap:18px}
+.card{background:rgba(255,255,255,.97);border:1px solid var(--line);box-shadow:0 10px 28px rgba(15,23,42,.07);border-radius:20px;padding:22px}
+.eyebrow{color:var(--muted);font-size:13px;font-weight:800}
+.value{font-size:70px;line-height:1;font-weight:900;letter-spacing:-3px;margin:17px 0 8px}
+.unit{font-size:20px;font-weight:800;color:var(--muted);margin-left:5px}
+.compare{font-size:17px;font-weight:850;margin-top:12px}
+.meta{display:flex;gap:15px;flex-wrap:wrap;margin-top:24px;font-size:13px;color:var(--muted)}
+.alert{margin-top:16px;border-radius:15px;padding:15px 16px;line-height:1.55;font-size:14px}
+.alert.normal{background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}
+.alert.delayed{background:#fffbeb;color:#92400e;border:1px solid #fde68a}
+.alert.error{background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
+.alert.waiting{background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe}
+.alert.setup{background:#f5f3ff;color:#5b21b6;border:1px solid #ddd6fe}
+.summary{display:grid;gap:11px}.summary-row{display:flex;justify-content:space-between;align-items:center;gap:14px;border:1px solid var(--line);border-radius:15px;padding:14px 15px}
+.summary-row b{text-align:right;font-size:17px}.section-title{font-size:19px;margin:0 0 15px}
+.history{display:grid;gap:10px}.history-row{display:grid;grid-template-columns:110px 1fr auto;align-items:center;gap:12px;border:1px solid var(--line);border-radius:14px;padding:13px 14px}
+.history-row.today{border-color:#93c5fd;background:#f8fbff}.small{font-size:12px;color:var(--muted);margin-top:3px}.speed{font-size:17px;font-weight:900}
+.chart-row{margin-bottom:18px}.bar-bg{height:11px;background:#edf1f6;border-radius:999px;overflow:hidden;margin-top:8px}.bar{height:100%;background:#93c5fd;border-radius:inherit}
+.placeholder{color:var(--muted);line-height:1.65}.checks{display:grid;gap:10px}.check{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:14px;padding:13px 14px}
+.icon{font-size:17px}.foot{color:var(--muted);font-size:12px;line-height:1.65;margin-top:14px}.footer{text-align:center;font-size:12px;color:var(--muted);margin-top:20px}
+button{border:0;border-radius:12px;background:#111827;color:#fff;font:inherit;font-weight:800;padding:10px 14px;cursor:pointer}
+.header-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+@media(max-width:800px){.grid{grid-template-columns:1fr}.header{flex-direction:column}.header-right{justify-content:flex-start}.value{font-size:56px}.history-row{grid-template-columns:95px 1fr auto}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="header">
+    <div>
+      <h1>🚗 달구벌 NOW</h1>
+      <div class="subtitle">대구 달구벌대로 · 하루 1회 실제 교통 데이터 기록판</div>
+    </div>
+    <div class="header-right">
+      <div id="badge" class="badge waiting"><span class="dot"></span><span id="badgeText">불러오는 중</span></div>
+      <button onclick="loadDashboard()">화면 새로고침</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="grid">
+      <section class="card">
+        <div id="mainEyebrow" class="eyebrow">오늘 수집 평균 통행속도</div>
+        <div><span id="speedValue" class="value">--</span><span class="unit">km/h</span></div>
+        <div id="compareText" class="compare">데이터를 확인하고 있습니다.</div>
+        <div class="meta">
+          <span id="recordDate">기록 날짜 --</span>
+          <span id="capturedAt">수집 시각 --</span>
+          <span id="sourceUpdated">원천 갱신 --</span>
+        </div>
+        <div id="alertBox"></div>
+      </section>
+
+      <section class="card summary">
+        <div class="summary-row"><span>오늘 수집 상태</span><b id="todayState">--</b></div>
+        <div class="summary-row"><span>비교 대상 날짜</span><b id="previousDate">--</b></div>
+        <div class="summary-row"><span>전날 대비</span><b id="difference">--</b></div>
+        <div class="summary-row"><span>저장된 실제 날짜</span><b id="historyDays">--</b></div>
+      </section>
+    </div>
+
+    <div class="grid" style="margin-top:18px">
+      <section class="card">
+        <h2 class="section-title">📊 오늘 vs 이전 실제 날짜</h2>
+        <div id="comparePanel" class="placeholder">비교 데이터를 확인하고 있습니다.</div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">🧭 데이터 신뢰 설명</h2>
+        <div id="trustPanel" class="placeholder">상태를 확인하고 있습니다.</div>
+      </section>
+    </div>
+
+    <div class="grid" style="margin-top:18px">
+      <section class="card">
+        <h2 class="section-title">🗓 최근 실제 기록</h2>
+        <div id="history" class="history"><div class="placeholder">DB 기록을 확인하고 있습니다.</div></div>
+        <div class="foot">하루에 성공한 값은 날짜별 1건으로 저장합니다. 같은 날 다시 정상 수집되면 그 날짜의 최신값으로 갱신됩니다.</div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">✅ 과제 조건</h2>
+        <div class="checks">
+          <div class="check"><span class="icon">①</span><div><b>실제로 변하는 값</b><div class="small">달구벌대로 평균 통행속도</div></div></div>
+          <div class="check"><span class="icon">②</span><div><b>실제 날짜별 기록</b><div class="small">Neon DB에 하루 1건 저장</div></div></div>
+          <div class="check"><span class="icon">③</span><div><b>어제와 비교</b><div class="small">직전 실제 날짜와 km/h·% 차이 계산</div></div></div>
+          <div class="check"><span class="icon">④</span><div><b>데이터 미수신 정직하게 표시</b><div class="small">실패 시 마지막 정상값임을 명시</div></div></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div class="footer">Data source: ITS 국가교통정보센터 · Daily collection: Vercel Cron · Storage: Neon Postgres</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function fmtDateTime(iso){
+  if(!iso) return "--";
+  const d = new Date(iso);
+  if(Number.isNaN(d.getTime())) return iso;
+  return new Intl.DateTimeFormat("ko-KR",{
+    timeZone:"Asia/Seoul",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"
+  }).format(d);
+}
+
+function setBadge(status){
+  const badge = $("badge");
+  let cls = "waiting";
+  let text = "확인 중";
+
+  if(status === "NORMAL"){cls="normal";text="오늘 데이터 정상";}
+  else if(status === "DELAYED"){cls="delayed";text="원천 데이터 지연";}
+  else if(status === "ERROR"){cls="error";text="오늘 수집 실패";}
+  else if(status === "MISSING"){cls="error";text="오늘 수집 기록 없음";}
+  else if(status === "WAITING"){cls="waiting";text="오늘 수집 전";}
+  else if(status === "SETUP_ERROR"){cls="setup";text="설정 필요";}
+
+  badge.className = `badge ${cls}`;
+  $("badgeText").textContent = text;
+}
+
+function alertClass(status){
+  if(status==="NORMAL") return "normal";
+  if(status==="DELAYED") return "delayed";
+  if(status==="ERROR" || status==="MISSING") return "error";
+  if(status==="SETUP_ERROR") return "setup";
+  return "waiting";
+}
+
+function renderHistory(rows,today){
+  const box=$("history");
+  if(!rows || !rows.length){
+    box.innerHTML=`<div class="placeholder">아직 저장된 실제 날짜 기록이 없습니다.</div>`;
+    return;
+  }
+  box.innerHTML=rows.map(row=>`
+    <div class="history-row ${row.date===today?"today":""}">
+      <b>${row.date}</b>
+      <div>${fmtDateTime(row.capturedAt)}<div class="small">${row.sourceStatus}</div></div>
+      <div class="speed">${row.averageSpeed} km/h</div>
+    </div>`).join("");
+}
+
+function renderComparison(data){
+  const comparison=data.comparison;
+
+  if(!data.todayRecord){
+    $("previousDate").textContent="--";
+    $("difference").textContent="--";
+    $("compareText").textContent="오늘 정상 수집값이 없어 전날 비교를 하지 않습니다.";
+    $("comparePanel").innerHTML=`<div class="placeholder">오늘 값이 정상적으로 수집된 뒤에만 전날과 비교합니다.<br>실패한 날에 마지막 정상값을 오늘 값처럼 비교하지 않습니다.</div>`;
+    return;
+  }
+
+  if(!comparison){
+    $("previousDate").textContent="이전 기록 없음";
+    $("difference").textContent="--";
+    $("compareText").textContent="첫 실제 날짜 기록입니다. 다음 실제 날짜부터 비교됩니다.";
+    $("comparePanel").innerHTML=`<div class="placeholder"><b>${data.todayRecord.date}</b>의 실제 값 <b>${data.todayRecord.averageSpeed} km/h</b>가 저장되었습니다.<br>다음 실제 날짜 수집 후 자동 비교됩니다.</div>`;
+    return;
+  }
+
+  const current=data.todayRecord;
+  const prev=comparison.previous;
+  const diff=comparison.differenceKmh;
+  const pct=comparison.differencePercent;
+  const max=Math.max(current.averageSpeed,prev.averageSpeed,1);
+
+  $("previousDate").textContent=prev.date;
+  $("difference").textContent=`${diff>0?"+":""}${diff} km/h`;
+
+  if(diff<0) $("compareText").textContent=`▼ ${Math.abs(diff)} km/h · 이전 실제 날짜보다 느립니다`;
+  else if(diff>0) $("compareText").textContent=`▲ ${diff} km/h · 이전 실제 날짜보다 빠릅니다`;
+  else $("compareText").textContent="이전 실제 날짜와 같은 평균속도입니다.";
+
+  $("comparePanel").innerHTML=`
+    <div class="chart-row">
+      <b>${prev.date}</b> · ${prev.averageSpeed} km/h
+      <div class="bar-bg"><div class="bar" style="width:${prev.averageSpeed/max*100}%"></div></div>
+    </div>
+    <div class="chart-row">
+      <b>${current.date}</b> · ${current.averageSpeed} km/h
+      <div class="bar-bg"><div class="bar" style="width:${current.averageSpeed/max*100}%"></div></div>
+    </div>
+    <div class="foot">속도 차이 ${diff>0?"+":""}${diff} km/h (${pct>0?"+":""}${pct}%)</div>`;
+}
+
+function renderTrust(data){
+  let html="";
+
+  if(data.status==="NORMAL"){
+    html=`<b>오늘 값 정상 수집</b><br><br>오늘 표시값은 오늘 자동 수집된 ITS 교통 데이터입니다. 전날 비교에도 이 값만 사용합니다.`;
+  }else if(data.status==="DELAYED"){
+    html=`<b>오늘 값은 있으나 원천 데이터가 지연됨</b><br><br>수집 자체는 성공했지만 ITS가 제공한 생성시각이 오래되어 ‘완전히 최신인 값’이라고 단정하지 않습니다.`;
+  }else if(data.status==="ERROR"){
+    html=`<b>오늘 수집 실패</b><br><br>오늘 새로운 교통값을 받지 못했습니다. 화면의 속도는 마지막 정상 기록이며 오늘 값이 아닙니다.<br><br>실패 사유: ${data.todayAttempt?.message||"알 수 없음"}`;
+  }else if(data.status==="MISSING"){
+    html=`<b>오늘 예정된 수집 기록이 없음</b><br><br>오전 9:30 이후인데 오늘의 Cron 실행 기록이 없습니다. 마지막 정상값이 있다면 참고용으로만 표시합니다.`;
+  }else if(data.status==="WAITING"){
+    html=`<b>오늘 자동 수집 전</b><br><br>한국시간 오전 9:30에 하루 한 번 자동 수집하도록 설정되어 있습니다. 지금 보이는 값이 있다면 이전 날짜의 참고값입니다.`;
+  }else{
+    html=data.message||"설정이 필요합니다.";
+  }
+
+  $("trustPanel").innerHTML=html;
+}
+
+async function loadDashboard(){
+  setBadge("WAITING");
+
+  try{
+    const response=await fetch("/api/dashboard",{cache:"no-store"});
+    const data=await response.json();
+
+    if(!data.ok){
+      setBadge("SETUP_ERROR");
+      $("todayState").textContent="설정 필요";
+      $("speedValue").textContent="--";
+      $("compareText").textContent="Vercel/Neon 설정을 확인하세요.";
+      $("alertBox").innerHTML=`<div class="alert setup"><b>아직 설정이 완료되지 않았습니다.</b><br>${data.message||"환경변수와 DB 연결을 확인하세요."}</div>`;
+      $("trustPanel").textContent="README.md의 배포 순서를 따라 Neon과 환경변수를 설정하세요.";
+      return;
+    }
+
+    setBadge(data.status);
+    const shown=data.shownRecord;
+
+    $("todayState").textContent=
+      data.status==="NORMAL"?"정상":
+      data.status==="DELAYED"?"지연":
+      data.status==="ERROR"?"수집 실패":
+      data.status==="MISSING"?"기록 없음":"수집 전";
+
+    $("historyDays").textContent=`${data.historyDays}일`;
+
+    if(shown){
+      $("speedValue").textContent=shown.averageSpeed;
+      $("recordDate").textContent=`표시 기록 ${shown.date}`;
+      $("capturedAt").textContent=`수집 ${fmtDateTime(shown.capturedAt)}`;
+      $("sourceUpdated").textContent=`ITS 갱신 ${fmtDateTime(shown.sourceUpdatedAt)}`;
+      $("mainEyebrow").textContent=data.shownRecordIsFallback?"마지막 정상 평균 통행속도":"오늘 수집 평균 통행속도";
+    }else{
+      $("speedValue").textContent="--";
+      $("recordDate").textContent="표시 기록 없음";
+      $("capturedAt").textContent="수집 시각 --";
+      $("sourceUpdated").textContent="ITS 갱신 --";
+    }
+
+    const cls=alertClass(data.status);
+    $("alertBox").innerHTML=`<div class="alert ${cls}"><b>${data.message}</b>${data.shownRecordIsFallback?"<br>※ 위 숫자는 오늘 값이 아니라 마지막 정상 기록입니다.":""}</div>`;
+
+    renderComparison(data);
+    renderTrust(data);
+
+    const today=new Date(data.serverTime).toLocaleDateString("sv-SE",{timeZone:"Asia/Seoul"});
+    renderHistory(data.history,today);
+
+  }catch(error){
+    setBadge("SETUP_ERROR");
+    $("alertBox").innerHTML=`<div class="alert setup">서버 API에 연결하지 못했습니다: ${error.message}</div>`;
+  }
+}
+
+loadDashboard();
+</script>
+</body>
+</html>
