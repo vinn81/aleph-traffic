@@ -1389,3 +1389,90 @@ def test_its_tls():
             "type": type(exc).__name__,
             "message": str(exc),
         }
+
+@app.get("/api/test-its-raw-http")
+def test_its_raw_http():
+    import socket
+    import ssl
+    import time
+    from urllib.parse import urlencode
+
+    host = "openapi.its.go.kr"
+    port = 9443
+
+    api_key = env("ITS_API_KEY")
+
+    if not api_key:
+        return {
+            "ok": False,
+            "message": "ITS_API_KEY가 설정되지 않았습니다.",
+        }
+
+    params = urlencode({
+        "apiKey": api_key,
+        "type": "all",
+        "drcType": "all",
+        "minX": 128.40,
+        "maxX": 128.80,
+        "minY": 35.75,
+        "maxY": 36.00,
+        "getType": "json",
+    })
+
+    path = f"/trafficInfo?{params}"
+
+    try:
+        started = time.perf_counter()
+
+        raw_socket = socket.create_connection(
+            (host, port),
+            timeout=10,
+        )
+
+        context = ssl.create_default_context()
+
+        tls_socket = context.wrap_socket(
+            raw_socket,
+            server_hostname=host,
+        )
+
+        tls_socket.settimeout(10)
+
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:9443\r\n"
+            "User-Agent: curl/8.0\r\n"
+            "Accept: */*\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+
+        tls_socket.sendall(
+            request.encode("ascii")
+        )
+
+        data = tls_socket.recv(1000)
+
+        elapsed = round(
+            time.perf_counter() - started,
+            2,
+        )
+
+        tls_socket.close()
+
+        return {
+            "ok": True,
+            "receivedBytes": len(data),
+            "elapsedSeconds": elapsed,
+            "preview": data.decode(
+                "utf-8",
+                errors="replace",
+            ),
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
