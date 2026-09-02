@@ -638,21 +638,15 @@ def raw_https_get_json(
     port: int,
     path: str,
 ):
+    from http.client import HTTPResponse
 
     request_text = (
-
         f"GET {path} HTTP/1.1\r\n"
-
         f"Host: {host}:{port}\r\n"
-
         "User-Agent: curl/8.0\r\n"
-
         "Accept: application/json\r\n"
-
         "Accept-Encoding: identity\r\n"
-
         "Connection: close\r\n"
-
         "\r\n"
     )
 
@@ -660,277 +654,117 @@ def raw_https_get_json(
     tls_socket = None
 
     try:
-
-        # -------------------------
-        # TCP 연결
-        # -------------------------
-
-        raw_socket = (
-            socket.create_connection(
-                (
-                    host,
-                    port,
-                ),
-                timeout=(
-                    CONNECT_TIMEOUT_SECONDS
-                ),
-            )
+        # TCP
+        raw_socket = socket.create_connection(
+            (host, port),
+            timeout=20,
         )
 
-        # -------------------------
-        # TLS 연결
-        # -------------------------
+        # TLS
+        context = ssl.create_default_context()
 
-        context = (
-            ssl.create_default_context()
-        )
-
-        tls_socket = (
-            context.wrap_socket(
-                raw_socket,
-                server_hostname=host,
-            )
+        tls_socket = context.wrap_socket(
+            raw_socket,
+            server_hostname=host,
         )
 
         tls_socket.settimeout(
             READ_TIMEOUT_SECONDS
         )
 
-        # -------------------------
-        # HTTP GET 전송
-        # -------------------------
-
+        # HTTP 요청
         tls_socket.sendall(
-            request_text.encode(
-                "ascii"
-            )
+            request_text.encode("ascii")
         )
 
-        # -------------------------
-        # 응답 전체 수신
-        # -------------------------
+        # Python 표준 HTTP 파서 사용
+        # chunked 응답의 마지막 0 chunk에서 자동 종료
+        response = HTTPResponse(
+            tls_socket
+        )
 
-        chunks = []
+        response.begin()
 
-        total_bytes = 0
+        status_code = (
+            response.status
+        )
 
-        while True:
+        body = response.read(
+            MAX_RESPONSE_BYTES + 1
+        )
 
-            part = tls_socket.recv(
-                65536
+        if (
+            len(body)
+            > MAX_RESPONSE_BYTES
+        ):
+            raise RuntimeError(
+                "ITS 응답 크기가 "
+                "허용 범위를 초과했습니다."
             )
 
-            if not part:
-                break
-
-            total_bytes += len(
-                part
-            )
-
-            if (
-                total_bytes
-                > MAX_RESPONSE_BYTES
-            ):
-
-                raise RuntimeError(
-                    "ITS 응답 크기가 "
-                    "허용 범위를 초과했습니다."
+        if not (
+            200
+            <= status_code
+            < 300
+        ):
+            preview = (
+                decode_response_text(
+                    body[:1000]
                 )
-
-            chunks.append(
-                part
             )
 
-        raw_response = b"".join(
-            chunks
-        )
-
-    finally:
-
-        if tls_socket is not None:
-
-            try:
-                tls_socket.close()
-
-            except Exception:
-                pass
-
-        elif raw_socket is not None:
-
-            try:
-                raw_socket.close()
-
-            except Exception:
-                pass
-
-    if not raw_response:
-
-        raise RuntimeError(
-            "ITS 서버가 빈 응답을 반환했습니다."
-        )
-
-    # -------------------------
-    # HTTP 헤더 / Body 분리
-    # -------------------------
-
-    try:
-
-        header_bytes, body = (
-            raw_response.split(
-                b"\r\n\r\n",
-                1,
+            raise RuntimeError(
+                f"ITS HTTP 오류 "
+                f"{status_code}: "
+                f"{preview}"
             )
+
+        content_encoding = (
+            response
+            .getheader(
+                "Content-Encoding",
+                "",
+            )
+            .lower()
         )
 
-    except ValueError as exc:
+        if (
+            content_encoding
+            == "gzip"
+        ):
+            body = gzip.decompress(
+                body
+            )
 
-        raise RuntimeError(
-            "ITS HTTP 응답 형식이 올바르지 않습니다."
-        ) from exc
-
-    header_text = (
-        header_bytes.decode(
-            "iso-8859-1",
-            errors="replace",
-        )
-    )
-
-    header_lines = (
-        header_text.split(
-            "\r\n"
-        )
-    )
-
-    status_line = (
-        header_lines[0]
-    )
-
-    # -------------------------
-    # HTTP 상태코드
-    # -------------------------
-
-    try:
-
-        status_code = int(
-            status_line.split(
-                " ",
-                2,
-            )[1]
-        )
-
-    except Exception as exc:
-
-        raise RuntimeError(
-            "ITS HTTP 상태를 "
-            f"해석할 수 없습니다: {status_line}"
-        ) from exc
-
-    # -------------------------
-    # HTTP 헤더 파싱
-    # -------------------------
-
-    headers = {}
-
-    for line in header_lines[1:]:
-
-        if ":" not in line:
-            continue
-
-        key, value = line.split(
-            ":",
-            1,
-        )
-
-        headers[
-            key.strip().lower()
-        ] = value.strip()
-
-    # -------------------------
-    # chunked 응답 처리
-    # -------------------------
-
-    transfer_encoding = (
-        headers.get(
-            "transfer-encoding",
-            "",
-        ).lower()
-    )
-
-    if (
-        "chunked"
-        in transfer_encoding
-    ):
-
-        body = (
-            decode_chunked_body(
+        text = (
+            decode_response_text(
                 body
             )
         )
 
-    # -------------------------
-    # gzip 응답 처리
-    # -------------------------
-
-    content_encoding = (
-        headers.get(
-            "content-encoding",
-            "",
-        ).lower()
-    )
-
-    if content_encoding == "gzip":
-
-        body = gzip.decompress(
-            body
-        )
-
-    # -------------------------
-    # HTTP 오류
-    # -------------------------
-
-    if not (
-        200
-        <= status_code
-        < 300
-    ):
-
-        preview = (
-            decode_response_text(
-                body[:1000]
+        try:
+            return json.loads(
+                text
             )
-        )
 
-        raise RuntimeError(
-            f"ITS HTTP 오류 {status_code}: "
-            f"{preview}"
-        )
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "ITS JSON 응답을 "
+                "해석할 수 없습니다."
+            ) from exc
 
-    # -------------------------
-    # 문자 인코딩
-    # -------------------------
+    finally:
+        if tls_socket is not None:
+            try:
+                tls_socket.close()
+            except Exception:
+                pass
 
-    text = (
-        decode_response_text(
-            body
-        )
-    )
-
-    # -------------------------
-    # JSON
-    # -------------------------
-
-    try:
-
-        return json.loads(
-            text
-        )
-
-    except json.JSONDecodeError as exc:
-
-        raise RuntimeError(
-            "ITS JSON 응답을 "
-            "해석할 수 없습니다."
-        ) from exc
+        elif raw_socket is not None:
+            try:
+                raw_socket.close()
+            except Exception:
+                pass
 
 
 # =========================================================
@@ -1928,7 +1762,7 @@ def dashboard():
             current.isoformat(),
 
         "expectedCollectTimeKST":
-            "09:30",
+            "09:00",
 
         "todayRecord":
             today_record,
