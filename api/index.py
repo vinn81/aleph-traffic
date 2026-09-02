@@ -1203,3 +1203,100 @@ async def ingest(
                     str(exc),
             },
         )
+
+@app.get("/api/test-its")
+def test_its():
+    import ssl
+    import time as time_module
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import urlencode
+    from urllib.request import Request as URLRequest, urlopen
+
+    api_key = env("ITS_API_KEY")
+
+    if not api_key:
+        return {
+            "ok": False,
+            "message": "ITS_API_KEY가 설정되지 않았습니다.",
+        }
+
+    params = {
+        "apiKey": api_key,
+        "type": "all",
+        "drcType": "all",
+        "minX": 128.40,
+        "maxX": 128.80,
+        "minY": 35.75,
+        "maxY": 36.00,
+        "getType": "json",
+    }
+
+    url = (
+        "https://openapi.its.go.kr:9443/trafficInfo?"
+        + urlencode(params)
+    )
+
+    request = URLRequest(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "aleph-traffic-test",
+        },
+        method="GET",
+    )
+
+    started = time_module.perf_counter()
+
+    try:
+        with urlopen(
+            request,
+            timeout=15,
+            context=ssl.create_default_context(),
+        ) as response:
+
+            raw = response.read(500)
+
+            elapsed = round(
+                time_module.perf_counter() - started,
+                2,
+            )
+
+            return {
+                "ok": True,
+                "httpStatus": response.status,
+                "elapsedSeconds": elapsed,
+                "receivedBytes": len(raw),
+                "preview": raw.decode(
+                    "utf-8",
+                    errors="replace",
+                ),
+            }
+
+    except HTTPError as exc:
+        return {
+            "ok": False,
+            "type": "HTTP_ERROR",
+            "status": exc.code,
+            "message": str(exc),
+        }
+
+    except URLError as exc:
+        return {
+            "ok": False,
+            "type": "URL_ERROR",
+            "message": str(exc.reason),
+        }
+
+    except TimeoutError:
+        return {
+            "ok": False,
+            "type": "TIMEOUT",
+            "message": "ITS 연결 시간이 초과되었습니다.",
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
