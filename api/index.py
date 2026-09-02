@@ -1840,3 +1840,89 @@ def test_tcp():
         ),
         "results": results,
     }
+
+@app.get("/api/test-standard-ports")
+def test_standard_ports():
+
+    results = []
+
+    for port in (80, 443):
+
+        started = datetime.now()
+
+        raw_socket = None
+        conn = None
+
+        try:
+            raw_socket = socket.create_connection(
+                (ITS_HOST, port),
+                timeout=5,
+            )
+
+            conn = raw_socket
+
+            if port == 443:
+                context = ssl.create_default_context()
+
+                conn = context.wrap_socket(
+                    raw_socket,
+                    server_hostname=ITS_HOST,
+                )
+
+                conn.settimeout(5)
+
+            request_text = (
+                "GET /trafficInfo HTTP/1.1\r\n"
+                f"Host: {ITS_HOST}\r\n"
+                "User-Agent: curl/8.0\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            )
+
+            conn.sendall(
+                request_text.encode("ascii")
+            )
+
+            preview = conn.recv(1000)
+
+            elapsed = (
+                datetime.now() - started
+            ).total_seconds()
+
+            results.append({
+                "port": port,
+                "ok": True,
+                "seconds": round(elapsed, 3),
+                "preview": preview.decode(
+                    "iso-8859-1",
+                    errors="replace",
+                )[:500],
+            })
+
+        except Exception as exc:
+
+            results.append({
+                "port": port,
+                "ok": False,
+                "type": type(exc).__name__,
+                "message": str(exc),
+            })
+
+        finally:
+
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+            elif raw_socket is not None:
+                try:
+                    raw_socket.close()
+                except Exception:
+                    pass
+
+    return {
+        "host": ITS_HOST,
+        "results": results,
+    }
