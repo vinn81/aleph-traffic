@@ -22,15 +22,17 @@ export default async function handler() {
   }
 
   const params = new URLSearchParams({
-    apiKey,
-    type: "all",
-    drcType: "all",
-    minX: "128.40",
-    maxX: "128.80",
-    minY: "35.75",
-    maxY: "36.00",
-    getType: "json",
-  });
+  apiKey,
+  type: "all",
+  drcType: "all",
+
+  minX: "128.55",
+  maxX: "128.60",
+  minY: "35.84",
+  maxY: "35.88",
+
+  getType: "json",
+});
 
   const url =
     `https://openapi.its.go.kr:9443/trafficInfo?${params.toString()}`;
