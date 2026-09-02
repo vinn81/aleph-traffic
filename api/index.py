@@ -1341,3 +1341,51 @@ def test_its_tcp():
             "type": type(exc).__name__,
             "message": str(exc),
         }
+
+@app.get("/api/test-its-tls")
+def test_its_tls():
+    import socket
+    import ssl
+    import time
+
+    host = "openapi.its.go.kr"
+    port = 9443
+
+    try:
+        started = time.perf_counter()
+
+        raw_socket = socket.create_connection(
+            (host, port),
+            timeout=10,
+        )
+
+        context = ssl.create_default_context()
+
+        tls_socket = context.wrap_socket(
+            raw_socket,
+            server_hostname=host,
+        )
+
+        elapsed = round(
+            time.perf_counter() - started,
+            2,
+        )
+
+        result = {
+            "ok": True,
+            "tlsConnected": True,
+            "tlsVersion": tls_socket.version(),
+            "cipher": tls_socket.cipher(),
+            "elapsedSeconds": elapsed,
+        }
+
+        tls_socket.close()
+
+        return result
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
