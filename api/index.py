@@ -1300,3 +1300,44 @@ def test_its():
             "type": type(exc).__name__,
             "message": str(exc),
         }
+
+@app.get("/api/test-its-tcp")
+def test_its_tcp():
+    import socket
+    import time
+
+    host = "openapi.its.go.kr"
+    port = 9443
+
+    try:
+        ips = socket.gethostbyname_ex(host)
+
+        started = time.perf_counter()
+
+        sock = socket.create_connection(
+            (host, port),
+            timeout=10,
+        )
+
+        elapsed = round(
+            time.perf_counter() - started,
+            2,
+        )
+
+        remote = sock.getpeername()
+        sock.close()
+
+        return {
+            "ok": True,
+            "dns": ips,
+            "tcpConnected": True,
+            "remote": remote,
+            "elapsedSeconds": elapsed,
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
