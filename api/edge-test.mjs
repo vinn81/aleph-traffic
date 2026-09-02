@@ -4,33 +4,61 @@ export const config = {
 };
 
 export default async function handler() {
+  const apiKey = process.env.ITS_API_KEY;
+
+  if (!apiKey) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        message: "ITS_API_KEY가 설정되지 않았습니다.",
+      }),
+      {
+        status: 200,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+        },
+      }
+    );
+  }
+
+  const params = new URLSearchParams({
+    apiKey,
+    type: "all",
+    drcType: "all",
+    minX: "128.40",
+    maxX: "128.80",
+    minY: "35.75",
+    maxY: "36.00",
+    getType: "json",
+  });
+
   const url =
-    "https://openapi.its.go.kr:9443/trafficInfo";
+    `https://openapi.its.go.kr:9443/trafficInfo?${params.toString()}`;
 
   try {
+    const started = Date.now();
+
     const response = await fetch(url, {
-      method: "GET",
       headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
+        Accept: "application/json",
       },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(20000),
     });
 
     const text = await response.text();
 
     return new Response(
       JSON.stringify({
-        ok: true,
-        status: response.status,
-        statusText: response.statusText,
-        preview: text.slice(0, 500),
+        ok: response.ok,
+        httpStatus: response.status,
+        elapsedMs: Date.now() - started,
+        responseLength: text.length,
+        preview: text.slice(0, 1500),
       }),
       {
         status: 200,
         headers: {
-          "content-type":
-            "application/json; charset=utf-8",
+          "content-type": "application/json; charset=utf-8",
         },
       }
     );
@@ -44,8 +72,7 @@ export default async function handler() {
       {
         status: 200,
         headers: {
-          "content-type":
-            "application/json; charset=utf-8",
+          "content-type": "application/json; charset=utf-8",
         },
       }
     );
