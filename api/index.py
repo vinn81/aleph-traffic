@@ -481,25 +481,6 @@ def expected_collect_passed(current):
     )
     return current >= expected
 
-
-def verify_cron_secret(authorization: str | None):
-    secret = env("CRON_SECRET")
-
-    if not secret:
-        return False, (
-            "CRON_SECRET가 설정되지 않았습니다. "
-            "Vercel 환경변수에 긴 임의 문자열을 등록하세요."
-        )
-
-    expected = f"Bearer {secret}"
-    actual = authorization or ""
-
-    if not hmac.compare_digest(actual, expected):
-        return False, "Cron 인증에 실패했습니다."
-
-    return True, None
-
-
 @app.get("/api")
 def api_index():
     return {
@@ -509,7 +490,6 @@ def api_index():
             "/api/health",
             "/api/dashboard",
             "/api/history",
-            "/api/collect",
         ],
     }
 
@@ -525,92 +505,6 @@ def health():
         "ingestSecretConfigured": bool(env("INGEST_SECRET")),
         "runtime": "Vercel Python / FastAPI",
     }
-
-
-@app.get("/api/collect")
-def collect(authorization: str | None = Header(default=None)):
-    valid, auth_error = verify_cron_secret(authorization)
-
-    if not valid:
-        return JSONResponse(
-            status_code=401,
-            content={
-                "ok": False,
-                "status": "UNAUTHORIZED",
-                "message": auth_error,
-            },
-        )
-
-    try:
-        conn = open_db()
-    except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "ok": False,
-                "status": "DB_ERROR",
-                "message": str(exc),
-            },
-        )
-
-    with conn:
-        ensure_tables(conn)
-
-        try:
-            data = fetch_dalgubeol_traffic()
-            save_successful_daily(conn, data)
-
-            attempt_status = (
-                "DELAYED"
-                if data["sourceStatus"] == "DELAYED"
-                else "SUCCESS"
-            )
-
-            attempt_message = (
-                "ITS 원천 데이터 생성시각이 오래되었습니다."
-                if attempt_status == "DELAYED"
-                else "정상 수집"
-            )
-
-            save_attempt(
-                conn,
-                status=attempt_status,
-                message=attempt_message,
-                data=data,
-            )
-
-            return {
-                "ok": True,
-                "status": attempt_status,
-                "date": data["localDate"].isoformat(),
-                "capturedAt": data["capturedAt"].isoformat(),
-                "averageSpeed": data["averageSpeed"],
-                "linkCount": data["linkCount"],
-                "sourceUpdatedAt": (
-                    data["sourceUpdatedAt"].isoformat()
-                    if data["sourceUpdatedAt"]
-                    else None
-                ),
-                "sourceAgeMinutes": data["sourceAgeMinutes"],
-                "slowLinks": data["slowLinks"],
-            }
-
-        except Exception as exc:
-            save_attempt(
-                conn,
-                status="FAILED",
-                message=str(exc),
-            )
-
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "ok": False,
-                    "status": "FAILED",
-                    "message": str(exc),
-                },
-            )
-
 
 @app.get("/api/history")
 def history():
