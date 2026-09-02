@@ -1,13 +1,7 @@
 import hmac
-import json
 import os
-import ssl
-import statistics
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request as URLRequest, urlopen
 
 import psycopg
 from fastapi import FastAPI, Header, Request
