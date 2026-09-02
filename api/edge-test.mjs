@@ -4,7 +4,7 @@ export const config = {
 };
 
 export default async function handler() {
-  const apiKey = process.env.ITS_API_KEY;
+  const apiKey = INVALID_TEST_KEY;
 
   if (!apiKey) {
     return Response.json({
