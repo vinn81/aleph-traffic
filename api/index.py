@@ -7,10 +7,10 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request as URLRequest, urlopen
 
 import psycopg
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
 app = FastAPI(title="달구벌 NOW API", version="3.0")
@@ -194,7 +194,7 @@ def fetch_dalgubeol_traffic():
 
     request_url = ITS_API_URL + "?" + urlencode(params)
 
-    request = Request(
+    request = URLRequest(
         request_url,
         headers={
             "Accept": "application/json, text/plain, */*",
@@ -760,3 +760,78 @@ def dashboard():
         "history": daily[:7],
         "historyDays": len(daily),
     }
+
+@app.post("/api/ingest")
+async def ingest(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    secret = env("INGEST_SECRET")
+
+    if not secret:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": "INGEST_SECRET가 설정되지 않았습니다."
+            },
+        )
+
+    expected = f"Bearer {secret}"
+
+    if not hmac.compare_digest(authorization or "", expected):
+        return JSONResponse(
+            status_code=401,
+            content={
+                "ok": False,
+                "message": "Ingest 인증에 실패했습니다."
+            },
+        )
+
+    try:
+        body = await request.json()
+
+        captured_at = datetime.fromisoformat(body["capturedAt"])
+        local_date = captured_at.astimezone(KST).date()
+
+        source_updated_at = None
+        if body.get("sourceUpdatedAt"):
+            source_updated_at = datetime.fromisoformat(
+                body["sourceUpdatedAt"]
+            )
+
+        data = {
+            "localDate": local_date,
+            "capturedAt": captured_at,
+            "road": "달구벌대로",
+            "averageSpeed": float(body["averageSpeed"]),
+            "linkCount": int(body["linkCount"]),
+            "minSpeed": float(body["minSpeed"]),
+            "maxSpeed": float(body["maxSpeed"]),
+            "sourceUpdatedAt": source_updated_at,
+            "sourceStatus": body.get("sourceStatus", "NORMAL"),
+        }
+
+        with open_db() as conn:
+            save_successful_daily(conn, data)
+            save_attempt(
+                conn,
+                status=data["sourceStatus"],
+                message="GitHub Actions 자동 수집",
+                data=data,
+            )
+
+        return {
+            "ok": True,
+            "date": local_date.isoformat(),
+            "averageSpeed": data["averageSpeed"],
+        }
+
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "message": str(exc),
+            },
+        )
