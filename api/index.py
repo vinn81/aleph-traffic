@@ -1785,3 +1785,58 @@ def dashboard():
         "historyDays":
             len(daily),
     }
+
+@app.get("/api/test-tcp")
+def test_tcp():
+
+    results = []
+
+    for i in range(5):
+
+        started = datetime.now()
+
+        try:
+
+            sock = socket.create_connection(
+                (
+                    ITS_HOST,
+                    ITS_PORT,
+                ),
+                timeout=5,
+            )
+
+            remote = sock.getpeername()
+
+            sock.close()
+
+            elapsed = (
+                datetime.now()
+                - started
+            ).total_seconds()
+
+            results.append({
+                "attempt": i + 1,
+                "ok": True,
+                "remote": remote,
+                "seconds": round(
+                    elapsed,
+                    3,
+                ),
+            })
+
+        except Exception as exc:
+
+            results.append({
+                "attempt": i + 1,
+                "ok": False,
+                "type": type(exc).__name__,
+                "message": str(exc),
+            })
+
+    return {
+        "ok": any(
+            row["ok"]
+            for row in results
+        ),
+        "results": results,
+    }
