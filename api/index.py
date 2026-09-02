@@ -518,14 +518,11 @@ def api_index():
 def health():
     return {
         "ok": bool(
-            env("ITS_API_KEY")
-            and db_url()
-            and env("CRON_SECRET")
+            db_url()
+            and env("INGEST_SECRET")
         ),
-        "itsApiKeyConfigured": bool(env("ITS_API_KEY")),
         "databaseConfigured": bool(db_url()),
-        "cronSecretConfigured": bool(env("CRON_SECRET")),
-        "expectedCollectTimeKST": "09:30",
+        "ingestSecretConfigured": bool(env("INGEST_SECRET")),
         "runtime": "Vercel Python / FastAPI",
     }
 
