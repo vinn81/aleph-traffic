@@ -1786,6 +1786,14 @@ def dashboard():
             len(daily),
     }
 
+@app.get("/api/whereami")
+def whereami():
+    return {
+        "region": os.environ.get("VERCEL_REGION"),
+        "env": os.environ.get("VERCEL_ENV"),
+        "url": os.environ.get("VERCEL_URL"),
+    }
+
 @app.get("/api/test-tcp")
 def test_tcp():
 
