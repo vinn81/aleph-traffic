@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import psycopg
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, Body
 from fastapi.responses import JSONResponse
 
 
@@ -1405,6 +1405,108 @@ def collect(
 
                 "message":
                     message,
+            },
+        )
+
+
+# =========================================================
+# 로컬 수집기 수신 (ITS가 클라우드 IP를 차단하므로
+# 국내 IP에서 수집한 결과를 여기로 전송받는다)
+# =========================================================
+
+@app.post("/api/ingest")
+def ingest(
+    payload: dict = Body(...),
+    authorization: str | None = Header(default=None),
+):
+    try:
+        if not verify_cron_secret(authorization):
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "message": "인증에 실패했습니다.",
+                },
+            )
+
+        required = [
+            "localDate",
+            "capturedAt",
+            "road",
+            "averageSpeed",
+            "linkCount",
+            "minSpeed",
+            "maxSpeed",
+            "sourceStatus",
+        ]
+
+        missing = [k for k in required if k not in payload]
+
+        if missing:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "message": f"누락된 필드: {missing}",
+                },
+            )
+
+        data = {
+            "localDate": datetime.fromisoformat(
+                payload["localDate"]
+            ).date(),
+
+            "capturedAt": datetime.fromisoformat(
+                payload["capturedAt"]
+            ),
+
+            "road": payload["road"],
+
+            "averageSpeed": float(payload["averageSpeed"]),
+
+            "linkCount": int(payload["linkCount"]),
+
+            "minSpeed": float(payload["minSpeed"]),
+
+            "maxSpeed": float(payload["maxSpeed"]),
+
+            "sourceUpdatedAt": (
+                datetime.fromisoformat(payload["sourceUpdatedAt"])
+                if payload.get("sourceUpdatedAt")
+                else None
+            ),
+
+            "sourceStatus": payload["sourceStatus"],
+        }
+
+        with open_db() as conn:
+
+            save_successful_daily(conn, data)
+
+            save_attempt(
+                conn,
+                status=data["sourceStatus"],
+                message="로컬 수집기 전송 성공",
+                data=data,
+            )
+
+        return {
+            "ok": True,
+            "date": data["localDate"].isoformat(),
+            "road": data["road"],
+            "averageSpeed": data["averageSpeed"],
+            "linkCount": data["linkCount"],
+            "minSpeed": data["minSpeed"],
+            "maxSpeed": data["maxSpeed"],
+            "sourceStatus": data["sourceStatus"],
+        }
+
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": str(exc),
             },
         )
 
