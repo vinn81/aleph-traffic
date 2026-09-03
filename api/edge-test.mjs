@@ -3,8 +3,11 @@ export const config = {
   regions: ["icn1"],
 };
 
-export default async function handler() {
-  const apiKey = INVALID_TEST_KEY;
+export default async function handler(request) {
+  const url = new URL(request.url);
+  const useFake = url.searchParams.get("fake") === "1";
+
+  const apiKey = useFake ? "INVALID_TEST_KEY" : process.env.ITS_API_KEY;
 
   if (!apiKey) {
     return Response.json({
@@ -25,39 +28,41 @@ export default async function handler() {
     getType: "json",
   });
 
-  const url =
-    `https://openapi.its.go.kr:9443/trafficInfo?${params.toString()}`;
+  const target = `https://openapi.its.go.kr:9443/trafficInfo?${params.toString()}`;
 
   let response;
 
   try {
-    response = await fetch(url, {
+    response = await fetch(target, {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-      },
+      headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(20000),
     });
   } catch (error) {
     return Response.json({
       ok: false,
       stage: "fetch",
+      keyMode: useFake ? "fake" : "real",
       name: error?.name,
       message: error?.message,
     });
   }
 
-  // 본문은 읽지 않고 바로 취소
+  let bodyHead = null;
   try {
-    await response.body?.cancel();
-  } catch (_) {}
+    const text = await response.text();
+    bodyHead = text.slice(0, 500);
+  } catch (error) {
+    bodyHead = `READ_ERROR: ${error?.name} ${error?.message}`;
+  }
 
   return Response.json({
     ok: true,
-    stage: "headers",
+    stage: "done",
+    keyMode: useFake ? "fake" : "real",
     httpStatus: response.status,
     contentType: response.headers.get("content-type"),
     contentLength: response.headers.get("content-length"),
-    transferEncoding: response.headers.get("transfer-encoding"),
+    bodyHead,
   });
 }
