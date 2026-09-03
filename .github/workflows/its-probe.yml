@@ -1,0 +1,27 @@
+name: ITS Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe ITS
+        env:
+          ITS_API_KEY: ${{ secrets.ITS_API_KEY }}
+        run: |
+          echo "runner egress IP:"
+          curl -s --max-time 10 https://api.ipify.org || echo "(ipify failed)"
+          echo
+
+          URL="https://openapi.its.go.kr:9443/trafficInfo?apiKey=${ITS_API_KEY}&type=all&drcType=all&minX=128.40&maxX=128.80&minY=35.75&maxY=36.00&getType=json"
+
+          curl -s --max-time 25 -o /tmp/its.json \
+            -w "HTTP %{http_code} / %{time_total}s / %{size_download} bytes\n" \
+            "$URL" || echo "CURL_FAILED exit=$?"
+
+          echo "--- head ---"
+          head -c 300 /tmp/its.json || true
+          echo
+          echo "ROAD_HITS: $(grep -o '달구벌대로' /tmp/its.json | wc -l)"
