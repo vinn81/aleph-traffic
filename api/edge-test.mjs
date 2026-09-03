@@ -3,66 +3,82 @@ export const config = {
   regions: ["icn1"],
 };
 
-export default async function handler(request) {
-  const url = new URL(request.url);
-  const useFake = url.searchParams.get("fake") === "1";
+const BASE = "https://openapi.its.go.kr:9443/trafficInfo";
 
-  const apiKey = useFake ? "INVALID_TEST_KEY" : process.env.ITS_API_KEY;
+const KEYLESS_PARAMS = new URLSearchParams({
+  type: "all",
+  drcType: "all",
+  minX: "128.55",
+  maxX: "128.60",
+  minY: "35.84",
+  maxY: "35.88",
+  getType: "json",
+}).toString();
 
-  if (!apiKey) {
-    return Response.json({
-      ok: false,
-      stage: "env",
-      message: "ITS_API_KEY가 없습니다.",
-    });
-  }
-
-  const params = new URLSearchParams({
-    apiKey,
-    type: "all",
-    drcType: "all",
-    minX: "128.55",
-    maxX: "128.60",
-    minY: "35.84",
-    maxY: "35.88",
-    getType: "json",
-  });
-
-  const target = `https://openapi.its.go.kr:9443/trafficInfo?${params.toString()}`;
-
-  let response;
-
+async function attempt(label, url, init) {
+  const started = Date.now();
   try {
-    response = await fetch(target, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(20000),
-    });
+    const res = await fetch(url, init);
+    let head = null;
+    try {
+      head = (await res.text()).slice(0, 200);
+    } catch (e) {
+      head = `READ_ERROR: ${e?.name}`;
+    }
+    return {
+      label,
+      ok: true,
+      status: res.status,
+      ms: Date.now() - started,
+      head,
+    };
   } catch (error) {
-    return Response.json({
+    return {
+      label,
       ok: false,
-      stage: "fetch",
-      keyMode: useFake ? "fake" : "real",
+      ms: Date.now() - started,
       name: error?.name,
       message: error?.message,
-    });
+    };
   }
+}
 
-  let bodyHead = null;
-  try {
-    const text = await response.text();
-    bodyHead = text.slice(0, 500);
-  } catch (error) {
-    bodyHead = `READ_ERROR: ${error?.name} ${error?.message}`;
+export default async function handler() {
+  const apiKey = process.env.ITS_API_KEY ?? "";
+  const results = [];
+
+  const plan = [
+    // 대조군: Edge fetch 자체가 살아있는지
+    ["control-example", "https://example.com", undefined],
+
+    // A. 알려진 성공 케이스 그대로 (파라미터/헤더/시그널 전부 없음)
+    ["A-bare", BASE, undefined],
+
+    // B. A + Accept 헤더
+    ["B-accept", BASE, { headers: { Accept: "application/json" } }],
+
+    // C. A + AbortSignal
+    ["C-signal", BASE, { signal: AbortSignal.timeout(6000) }],
+
+    // D. A + 쿼리스트링 (키 없음)
+    ["D-params", `${BASE}?${KEYLESS_PARAMS}`, undefined],
+
+    // E. 443 포트로 같은 요청
+    ["E-port443", "https://openapi.its.go.kr/trafficInfo", undefined],
+  ];
+
+  const deadline = Date.now() + 20000;
+
+  for (const [label, url, init] of plan) {
+    if (Date.now() > deadline) {
+      results.push({ label, skipped: "time budget exceeded" });
+      continue;
+    }
+    results.push(await attempt(label, url, init));
   }
 
   return Response.json({
-    ok: true,
-    stage: "done",
-    keyMode: useFake ? "fake" : "real",
-    httpStatus: response.status,
-    contentType: response.headers.get("content-type"),
-    contentLength: response.headers.get("content-length"),
-    bodyHead,
+    apiKeyPresent: apiKey.length > 0,
+    results,
   });
 }
