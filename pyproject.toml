@@ -1,7 +1,7 @@
 [project]
 name = "dalgubeol-now"
-version = "3.0.0"
-description = "Daily Dalgubeol-daero traffic dashboard using ITS, Vercel Cron and Neon"
+version = "4.1.0"
+description = "Daily Dalgubeol-daero traffic dashboard using a local ITS collector, Vercel FastAPI, and Neon Postgres"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.141.1",
