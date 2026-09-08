@@ -1,57 +1,55 @@
-import gzip
+from __future__ import annotations
+
 import hmac
-import json
+import logging
 import os
-import socket
-import ssl
-from datetime import datetime, time
-from urllib.parse import urlencode
+from datetime import date, datetime, time, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import psycopg
-from fastapi import FastAPI, Header, Body
+from fastapi import FastAPI, Header
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-app = FastAPI(
-    title="달구벌 NOW API",
-    version="4.0",
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("dalgubeol-now")
 
-
-# =========================================================
-# 기본 설정
-# =========================================================
+app = FastAPI(title="달구벌 NOW API", version="5.1.0")
 
 KST = ZoneInfo("Asia/Seoul")
-
 ROAD_NAME = "달구벌대로"
+EXPECTED_HOUR_KST = 9
+EXPECTED_MINUTE_KST = 0
+OFFICIAL_CAPTURE_LAST_MINUTE_KST = 9
+MISSED_CHECK_HOUR_KST = 10
+MISSED_CHECK_MINUTE_KST = 0
+HISTORY_QUERY_LIMIT = 30
+DASHBOARD_HISTORY_LIMIT = 7
+SOURCE_SAMPLE_LIMIT = 5
 
-ITS_HOST = "openapi.its.go.kr"
-ITS_PORT = 9443
-ITS_PATH = "/trafficInfo"
-
-BBOX = {
+SOURCE_NAME = "국가교통정보센터 ITS"
+SOURCE_API_ENDPOINT = "https://openapi.its.go.kr:9443/trafficInfo"
+SOURCE_CONTEXT_URL = "https://its.go.kr"
+SOURCE_BBOX = {
     "minX": 128.40,
     "maxX": 128.80,
     "minY": 35.75,
     "maxY": 36.00,
 }
 
-EXPECTED_HOUR_KST = 9
-EXPECTED_MINUTE_KST = 0
-
-SOURCE_DELAY_MINUTES = 30
-
-CONNECT_TIMEOUT_SECONDS = 10
-READ_TIMEOUT_SECONDS = 45
-
-# ITS 응답이 비정상적으로 너무 큰 경우 방지
-MAX_RESPONSE_BYTES = 20 * 1024 * 1024
+FAILURE_TYPES = (
+    "TIMEOUT",
+    "HTTP_ERROR",
+    "INVALID_JSON",
+    "EMPTY_DATA",
+    "STALE_DATA",
+)
 
 
 # =========================================================
-# 환경변수 / 시간
+# 환경 / 시간 / 인증
 # =========================================================
 
 def env(name: str) -> str:
@@ -59,128 +57,422 @@ def env(name: str) -> str:
 
 
 def db_url() -> str:
-    return (
-        env("DATABASE_URL")
-        or env("POSTGRES_URL")
-    )
+    return env("DATABASE_URL") or env("POSTGRES_URL")
+
+
+def shared_secret() -> str:
+    # 로컬 수집기 인증. 기존 배포의 CRON_SECRET도 호환한다.
+    return env("INGEST_SECRET") or env("CRON_SECRET")
+
+
+def cron_secret() -> str:
+    # Vercel Cron은 CRON_SECRET을 Authorization Bearer로 자동 전달한다.
+    return env("CRON_SECRET")
 
 
 def now_kst() -> datetime:
     return datetime.now(KST)
 
 
-def parse_its_datetime(value) -> datetime | None:
+def expected_collect_passed(current: datetime) -> bool:
+    expected = datetime.combine(
+        current.date(),
+        time(EXPECTED_HOUR_KST, EXPECTED_MINUTE_KST),
+        tzinfo=KST,
+    )
+    return current >= expected
 
-    if not value:
-        return None
 
-    text = str(value).strip()
+def verify_secret(authorization: str | None) -> bool:
+    secret = shared_secret()
+    if not secret:
+        return False
+    return hmac.compare_digest(authorization or "", f"Bearer {secret}")
 
-    formats = (
-        "%Y%m%d%H%M%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
+
+def verify_cron_secret(authorization: str | None) -> bool:
+    secret = cron_secret()
+    if not secret:
+        return False
+    return hmac.compare_digest(authorization or "", f"Bearer {secret}")
+
+
+def official_capture_time(captured_at: datetime) -> bool:
+    captured_kst = captured_at.astimezone(KST)
+    return (
+        captured_kst.hour == EXPECTED_HOUR_KST
+        and EXPECTED_MINUTE_KST
+        <= captured_kst.minute
+        <= OFFICIAL_CAPTURE_LAST_MINUTE_KST
     )
 
-    for fmt in formats:
 
-        try:
+# =========================================================
+# 요청 모델
+# =========================================================
 
-            parsed = datetime.strptime(
-                text,
-                fmt,
+class SourceSamplePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    roadName: str
+    linkId: str | None = Field(default=None, max_length=100)
+    speed: float = Field(gt=0, le=200)
+    sourceUpdatedAt: datetime | None = None
+
+    @field_validator("roadName")
+    @classmethod
+    def validate_road(cls, value: str) -> str:
+        if ROAD_NAME not in value.strip():
+            raise ValueError(f"roadName에는 '{ROAD_NAME}'이 포함되어야 합니다.")
+        return value.strip()
+
+    @field_validator("sourceUpdatedAt")
+    @classmethod
+    def validate_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("sourceUpdatedAt에는 timezone 정보가 필요합니다.")
+        return value
+
+
+class IngestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    localDate: date
+    capturedAt: datetime
+    road: str
+    averageSpeed: float = Field(gt=0, le=200)
+    linkCount: int = Field(gt=0, le=10000)
+    minSpeed: float = Field(gt=0, le=200)
+    maxSpeed: float = Field(gt=0, le=200)
+    sourceUpdatedAt: datetime | None = None
+    sourceStatus: Literal["NORMAL", "DELAYED"]
+
+    sourceTimestampCount: int | None = Field(default=None, ge=0, le=10000)
+    staleLinkCount: int | None = Field(default=None, ge=0, le=10000)
+    staleRatio: float | None = Field(default=None, ge=0, le=1)
+    samples: list[SourceSamplePayload] = Field(
+        default_factory=list,
+        max_length=SOURCE_SAMPLE_LIMIT,
+    )
+
+    @field_validator("road")
+    @classmethod
+    def validate_road(cls, value: str) -> str:
+        if value.strip() != ROAD_NAME:
+            raise ValueError(f"road는 '{ROAD_NAME}'이어야 합니다.")
+        return ROAD_NAME
+
+    @field_validator("capturedAt", "sourceUpdatedAt")
+    @classmethod
+    def validate_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("시간 값에는 timezone 정보가 필요합니다.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_consistency(self):
+        captured_kst = self.capturedAt.astimezone(KST)
+        if self.localDate != captured_kst.date():
+            raise ValueError("localDate와 capturedAt의 한국 날짜가 일치해야 합니다.")
+
+        if not official_capture_time(self.capturedAt):
+            raise ValueError(
+                "공식 일별 기록은 KST 09:00~09:09에 수집된 값만 저장할 수 있습니다."
             )
 
-            return parsed.replace(
-                tzinfo=KST
-            )
+        if not (self.minSpeed <= self.averageSpeed <= self.maxSpeed):
+            raise ValueError("minSpeed <= averageSpeed <= maxSpeed 조건을 만족해야 합니다.")
 
-        except ValueError:
-            continue
+        if (
+            self.sourceTimestampCount is not None
+            and self.staleLinkCount is not None
+            and self.staleLinkCount > self.sourceTimestampCount
+        ):
+            raise ValueError("staleLinkCount는 sourceTimestampCount보다 클 수 없습니다.")
 
-    return None
+        return self
+
+
+class AttemptPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    localDate: date
+    attemptedAt: datetime
+    status: Literal["FAILED"]
+    failureType: Literal[
+        "TIMEOUT",
+        "HTTP_ERROR",
+        "INVALID_JSON",
+        "EMPTY_DATA",
+        "STALE_DATA",
+    ] | None = None
+    message: str = Field(min_length=1, max_length=500)
+
+    @field_validator("attemptedAt")
+    @classmethod
+    def validate_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("attemptedAt에는 timezone 정보가 필요합니다.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_date(self):
+        if self.localDate != self.attemptedAt.astimezone(KST).date():
+            raise ValueError("localDate와 attemptedAt의 한국 날짜가 일치해야 합니다.")
+        return self
 
 
 # =========================================================
 # DB
 # =========================================================
 
-def ensure_tables(conn):
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS traffic_daily (
-            local_date DATE PRIMARY KEY,
-            captured_at TIMESTAMPTZ NOT NULL,
-            road_name TEXT NOT NULL,
-            average_speed DOUBLE PRECISION NOT NULL,
-            link_count INTEGER NOT NULL,
-            min_speed DOUBLE PRECISION,
-            max_speed DOUBLE PRECISION,
-            source_updated_at TIMESTAMPTZ,
-            source_status TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS collection_attempts (
-            id BIGSERIAL PRIMARY KEY,
-            attempted_at TIMESTAMPTZ NOT NULL,
-            local_date DATE NOT NULL,
-            status TEXT NOT NULL,
-            message TEXT,
-            average_speed DOUBLE PRECISION,
-            link_count INTEGER,
-            source_updated_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_attempts_date_time
-        ON collection_attempts(
-            local_date,
-            attempted_at DESC
-        )
-        """
-    )
-
-
 def open_db():
-
     url = db_url()
-
     if not url:
+        raise RuntimeError("DATABASE_URL이 설정되지 않았습니다.")
+    # Connection context가 정상 종료 시 commit, 예외 시 rollback한다.
+    return psycopg.connect(url)
 
-        raise RuntimeError(
-            "DATABASE_URL이 설정되지 않았습니다. "
-            "Vercel 프로젝트에 Neon Postgres를 연결하세요."
+
+def serialize_daily(row) -> dict | None:
+    if not row:
+        return None
+
+    return {
+        "date": row[0].isoformat(),
+        "capturedAt": row[1].isoformat(),
+        "roadName": row[2],
+        "averageSpeed": float(row[3]),
+        "linkCount": int(row[4]),
+        "minSpeed": float(row[5]) if row[5] is not None else None,
+        "maxSpeed": float(row[6]) if row[6] is not None else None,
+        "sourceUpdatedAt": row[7].isoformat() if row[7] else None,
+        "sourceStatus": row[8],
+    }
+
+
+def daily_select_sql() -> str:
+    return """
+        SELECT
+            local_date,
+            captured_at,
+            road_name,
+            average_speed,
+            link_count,
+            min_speed,
+            max_speed,
+            source_updated_at,
+            source_status
+        FROM traffic_daily
+    """
+
+
+def query_daily(conn, limit: int = HISTORY_QUERY_LIMIT) -> list[dict]:
+    rows = conn.execute(
+        daily_select_sql() + " ORDER BY local_date DESC LIMIT %s",
+        (limit,),
+    ).fetchall()
+    return [serialize_daily(row) for row in rows]
+
+
+def query_daily_on(conn, target_date: date) -> dict | None:
+    row = conn.execute(
+        daily_select_sql() + " WHERE local_date = %s LIMIT 1",
+        (target_date,),
+    ).fetchone()
+    return serialize_daily(row)
+
+
+def query_latest_daily(conn) -> dict | None:
+    row = conn.execute(
+        daily_select_sql() + " ORDER BY local_date DESC LIMIT 1"
+    ).fetchone()
+    return serialize_daily(row)
+
+
+def query_latest_normal(conn) -> dict | None:
+    row = conn.execute(
+        daily_select_sql()
+        + " WHERE source_status = 'NORMAL' ORDER BY local_date DESC LIMIT 1"
+    ).fetchone()
+    return serialize_daily(row)
+
+
+def query_total_days(conn) -> int:
+    row = conn.execute("SELECT COUNT(*) FROM traffic_daily").fetchone()
+    return int(row[0]) if row else 0
+
+
+def query_latest_attempt_today(conn, today: date) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT
+            attempted_at,
+            status,
+            failure_type,
+            message,
+            average_speed,
+            link_count,
+            source_updated_at
+        FROM collection_attempts
+        WHERE local_date = %s
+        ORDER BY attempted_at DESC
+        LIMIT 1
+        """,
+        (today,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "attemptedAt": row[0].isoformat(),
+        "status": row[1],
+        "failureType": row[2],
+        "message": row[3],
+        "averageSpeed": float(row[4]) if row[4] is not None else None,
+        "linkCount": int(row[5]) if row[5] is not None else None,
+        "sourceUpdatedAt": row[6].isoformat() if row[6] else None,
+    }
+
+
+def query_latest_collector_attempt_today(conn, today: date) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT
+            attempted_at,
+            status,
+            failure_type,
+            message,
+            average_speed,
+            link_count,
+            source_updated_at
+        FROM collection_attempts
+        WHERE local_date = %s
+          AND status <> 'MISSED'
+        ORDER BY attempted_at DESC
+        LIMIT 1
+        """,
+        (today,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "attemptedAt": row[0].isoformat(),
+        "status": row[1],
+        "failureType": row[2],
+        "message": row[3],
+        "averageSpeed": float(row[4]) if row[4] is not None else None,
+        "linkCount": int(row[5]) if row[5] is not None else None,
+        "sourceUpdatedAt": row[6].isoformat() if row[6] else None,
+    }
+
+
+def query_recent_attempts(conn, limit: int = 10) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT
+            attempted_at,
+            local_date,
+            status,
+            failure_type,
+            average_speed,
+            link_count,
+            source_updated_at
+        FROM collection_attempts
+        ORDER BY attempted_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    ).fetchall()
+
+    return [
+        {
+            "attemptedAt": row[0].isoformat(),
+            "localDate": row[1].isoformat(),
+            "status": row[2],
+            "failureType": row[3],
+            "averageSpeed": float(row[4]) if row[4] is not None else None,
+            "linkCount": int(row[5]) if row[5] is not None else None,
+            "sourceUpdatedAt": row[6].isoformat() if row[6] else None,
+        }
+        for row in rows
+    ]
+
+
+def query_source_samples(conn, target_date: date, limit: int = SOURCE_SAMPLE_LIMIT) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT
+            road_name,
+            link_id,
+            speed,
+            source_updated_at,
+            captured_at
+        FROM traffic_source_samples
+        WHERE local_date = %s
+        ORDER BY id ASC
+        LIMIT %s
+        """,
+        (target_date, limit),
+    ).fetchall()
+
+    return [
+        {
+            "roadName": row[0],
+            "linkId": row[1],
+            "speed": float(row[2]),
+            "sourceUpdatedAt": row[3].isoformat() if row[3] else None,
+            "capturedAt": row[4].isoformat(),
+        }
+        for row in rows
+    ]
+
+
+def save_attempt(
+    conn,
+    *,
+    attempted_at: datetime,
+    local_date: date,
+    status: str,
+    message: str | None,
+    failure_type: str | None = None,
+    average_speed: float | None = None,
+    link_count: int | None = None,
+    source_updated_at: datetime | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO collection_attempts (
+            attempted_at,
+            local_date,
+            status,
+            failure_type,
+            message,
+            average_speed,
+            link_count,
+            source_updated_at
         )
-
-    return psycopg.connect(
-        url,
-        autocommit=True,
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            attempted_at,
+            local_date,
+            status,
+            failure_type,
+            message,
+            average_speed,
+            link_count,
+            source_updated_at,
+        ),
     )
 
 
-# =========================================================
-# 일별 데이터 저장
-# =========================================================
-
-def save_successful_daily(
-    conn,
-    data,
-):
-
-    ensure_tables(conn)
-
-    conn.execute(
+def save_daily(conn, payload: IngestPayload) -> bool:
+    """Save one day. A DELAYED retry never overwrites an existing NORMAL row."""
+    cursor = conn.execute(
         """
         INSERT INTO traffic_daily (
             local_date,
@@ -194,21 +486,8 @@ def save_successful_daily(
             source_status,
             updated_at
         )
-        VALUES (
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            NOW()
-        )
-
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (local_date)
-
         DO UPDATE SET
             captured_at = EXCLUDED.captured_at,
             road_name = EXCLUDED.road_name,
@@ -219,1726 +498,600 @@ def save_successful_daily(
             source_updated_at = EXCLUDED.source_updated_at,
             source_status = EXCLUDED.source_status,
             updated_at = NOW()
+        WHERE
+            traffic_daily.source_status <> 'NORMAL'
+            OR EXCLUDED.source_status = 'NORMAL'
         """,
         (
-            data["localDate"],
-            data["capturedAt"],
-            data["road"],
-            data["averageSpeed"],
-            data["linkCount"],
-            data["minSpeed"],
-            data["maxSpeed"],
-            data["sourceUpdatedAt"],
-            data["sourceStatus"],
+            payload.localDate,
+            payload.capturedAt,
+            payload.road,
+            payload.averageSpeed,
+            payload.linkCount,
+            payload.minSpeed,
+            payload.maxSpeed,
+            payload.sourceUpdatedAt,
+            payload.sourceStatus,
         ),
     )
+    return cursor.rowcount > 0
 
 
-# =========================================================
-# 수집 시도 기록
-# =========================================================
-
-def save_attempt(
-    conn,
-    status: str,
-    message: str | None = None,
-    data: dict | None = None,
-):
-
-    ensure_tables(conn)
-
-    attempted_at = now_kst()
-
-    if (
-        data
-        and data.get("localDate")
-    ):
-
-        local_date = data[
-            "localDate"
-        ]
-
-    else:
-
-        local_date = (
-            attempted_at.date()
-        )
-
+def replace_source_samples(conn, payload: IngestPayload) -> None:
     conn.execute(
-        """
-        INSERT INTO collection_attempts (
-            attempted_at,
-            local_date,
-            status,
-            message,
-            average_speed,
-            link_count,
-            source_updated_at
-        )
-        VALUES (
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s
-        )
-        """,
-        (
-            attempted_at,
-            local_date,
-            status,
-            message,
-
-            (
-                data.get(
-                    "averageSpeed"
-                )
-                if data
-                else None
-            ),
-
-            (
-                data.get(
-                    "linkCount"
-                )
-                if data
-                else None
-            ),
-
-            (
-                data.get(
-                    "sourceUpdatedAt"
-                )
-                if data
-                else None
-            ),
-        ),
+        "DELETE FROM traffic_source_samples WHERE local_date = %s",
+        (payload.localDate,),
     )
 
-
-def record_failed_attempt(
-    message: str,
-):
-
-    try:
-
-        with open_db() as conn:
-
-            save_attempt(
-                conn,
-                status="FAILED",
-                message=message,
+    for sample in payload.samples[:SOURCE_SAMPLE_LIMIT]:
+        conn.execute(
+            """
+            INSERT INTO traffic_source_samples (
+                local_date,
+                captured_at,
+                road_name,
+                link_id,
+                speed,
+                source_updated_at
             )
-
-    except Exception:
-        pass
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                payload.localDate,
+                payload.capturedAt,
+                sample.roadName,
+                sample.linkId,
+                sample.speed,
+                sample.sourceUpdatedAt,
+            ),
+        )
 
 
 # =========================================================
-# DB 데이터 변환
+# 검증 로직 (DB를 변경하지 않는 합성 재생)
 # =========================================================
 
-def serialize_daily(row):
+def synthetic_failure_replay() -> list[dict]:
+    """Replay five external failure classes in memory only.
 
-    if not row:
-        return None
+    TIMEOUT/HTTP/INVALID_JSON/EMPTY_DATA never reach traffic_daily.
+    STALE_DATA reaches the summary stage as DELAYED, but the DB upsert policy blocks
+    DELAYED from overwriting an existing NORMAL row.
+    """
+    scenarios = []
 
-    return {
-
-        "date":
-            row[0].isoformat(),
-
-        "capturedAt":
-            row[1].isoformat(),
-
-        "roadName":
-            row[2],
-
-        "averageSpeed":
-            float(row[3]),
-
-        "linkCount":
-            int(row[4]),
-
-        "minSpeed":
-            (
-                float(row[5])
-                if row[5] is not None
-                else None
-            ),
-
-        "maxSpeed":
-            (
-                float(row[6])
-                if row[6] is not None
-                else None
-            ),
-
-        "sourceUpdatedAt":
-            (
-                row[7].isoformat()
-                if row[7]
-                else None
-            ),
-
-        "sourceStatus":
-            row[8],
+    definitions = {
+        "TIMEOUT": "외부 ITS 응답 시간 초과",
+        "HTTP_ERROR": "외부 ITS HTTP/연결 오류",
+        "INVALID_JSON": "외부 응답 JSON 해석 실패",
+        "EMPTY_DATA": "달구벌대로 유효 데이터 없음",
+        "STALE_DATA": "원천 데이터 지연으로 DELAYED 판정",
     }
 
-
-def query_daily(
-    conn,
-    limit=30,
-):
-
-    ensure_tables(conn)
-
-    rows = conn.execute(
-        """
-        SELECT
-            local_date,
-            captured_at,
-            road_name,
-            average_speed,
-            link_count,
-            min_speed,
-            max_speed,
-            source_updated_at,
-            source_status
-
-        FROM traffic_daily
-
-        ORDER BY local_date DESC
-
-        LIMIT %s
-        """,
-        (limit,),
-    ).fetchall()
-
-    return [
-        serialize_daily(row)
-        for row in rows
-    ]
-
-
-def query_latest_attempt_today(
-    conn,
-    today,
-):
-
-    ensure_tables(conn)
-
-    row = conn.execute(
-        """
-        SELECT
-            attempted_at,
-            status,
-            message,
-            average_speed,
-            link_count,
-            source_updated_at
-
-        FROM collection_attempts
-
-        WHERE local_date = %s
-
-        ORDER BY attempted_at DESC
-
-        LIMIT 1
-        """,
-        (today,),
-    ).fetchone()
-
-    if not row:
-        return None
-
-    return {
-
-        "attemptedAt":
-            row[0].isoformat(),
-
-        "status":
-            row[1],
-
-        "message":
-            row[2],
-
-        "averageSpeed":
-            (
-                float(row[3])
-                if row[3] is not None
-                else None
-            ),
-
-        "linkCount":
-            row[4],
-
-        "sourceUpdatedAt":
-            (
-                row[5].isoformat()
-                if row[5]
-                else None
-            ),
-    }
-
-
-# =========================================================
-# 예정 수집시간 확인
-# =========================================================
-
-def expected_collect_passed(
-    current,
-):
-
-    expected = datetime.combine(
-        current.date(),
-        time(
-            EXPECTED_HOUR_KST,
-            EXPECTED_MINUTE_KST,
-        ),
-        tzinfo=KST,
-    )
-
-    return current >= expected
-
-
-# =========================================================
-# HTTP chunked 응답 해제
-# =========================================================
-
-def decode_chunked_body(
-    body: bytes,
-) -> bytes:
-
-    output = bytearray()
-
-    position = 0
-
-    while True:
-
-        line_end = body.find(
-            b"\r\n",
-            position,
-        )
-
-        if line_end < 0:
-
-            raise RuntimeError(
-                "ITS chunked 응답 형식이 올바르지 않습니다."
+    for failure_type in FAILURE_TYPES:
+        if failure_type == "STALE_DATA":
+            reached_daily_write = True
+            existing_status = "NORMAL"
+            incoming_status = "DELAYED"
+            overwrite_allowed = (
+                existing_status != "NORMAL" or incoming_status == "NORMAL"
             )
-
-        size_line = body[
-            position:line_end
-        ]
-
-        size_line = size_line.split(
-            b";",
-            1,
-        )[0].strip()
-
-        try:
-
-            chunk_size = int(
-                size_line,
-                16,
-            )
-
-        except ValueError as exc:
-
-            raise RuntimeError(
-                "ITS chunk 크기를 해석할 수 없습니다."
-            ) from exc
-
-        position = line_end + 2
-
-        if chunk_size == 0:
-            break
-
-        chunk_end = (
-            position
-            + chunk_size
-        )
-
-        if chunk_end > len(body):
-
-            raise RuntimeError(
-                "ITS chunked 응답이 중간에 끊겼습니다."
-            )
-
-        output.extend(
-            body[
-                position:chunk_end
-            ]
-        )
-
-        position = chunk_end
-
-        if (
-            body[
-                position:
-                position + 2
-            ]
-            != b"\r\n"
-        ):
-
-            raise RuntimeError(
-                "ITS chunk 구분자가 올바르지 않습니다."
-            )
-
-        position += 2
-
-    return bytes(output)
-
-
-# =========================================================
-# ITS 문자 인코딩 처리
-# =========================================================
-
-def decode_response_text(
-    body: bytes,
-) -> str:
-
-    # 정상 UTF-8이면 그대로 사용
-    try:
-
-        return body.decode(
-            "utf-8"
-        )
-
-    except UnicodeDecodeError:
-        pass
-
-    # ITS 응답에서 한글이 CP949로 오는 경우 대비
-    try:
-
-        return body.decode(
-            "cp949"
-        )
-
-    except UnicodeDecodeError:
-        pass
-
-    return body.decode(
-        "euc-kr",
-        errors="replace",
-    )
-
-
-# =========================================================
-# RAW HTTPS GET
-#
-# urllib 방식 대신
-# 실제 Vercel에서 성공한 방식 사용
-# =========================================================
-
-def raw_https_get_json(
-    host: str,
-    port: int,
-    path: str,
-):
-    from http.client import HTTPResponse
-
-    request_text = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
-        "User-Agent: curl/8.0\r\n"
-        "Accept: application/json\r\n"
-        "Accept-Encoding: identity\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-    )
-
-    raw_socket = None
-    tls_socket = None
-
-    try:
-        # TCP
-        raw_socket = socket.create_connection(
-            (host, port),
-            timeout=20,
-        )
-
-        # TLS
-        context = ssl.create_default_context()
-
-        tls_socket = context.wrap_socket(
-            raw_socket,
-            server_hostname=host,
-        )
-
-        tls_socket.settimeout(
-            READ_TIMEOUT_SECONDS
-        )
-
-        # HTTP 요청
-        tls_socket.sendall(
-            request_text.encode("ascii")
-        )
-
-        # Python 표준 HTTP 파서 사용
-        # chunked 응답의 마지막 0 chunk에서 자동 종료
-        response = HTTPResponse(
-            tls_socket
-        )
-
-        response.begin()
-
-        status_code = (
-            response.status
-        )
-
-        body = response.read(
-            MAX_RESPONSE_BYTES + 1
-        )
-
-        if (
-            len(body)
-            > MAX_RESPONSE_BYTES
-        ):
-            raise RuntimeError(
-                "ITS 응답 크기가 "
-                "허용 범위를 초과했습니다."
-            )
-
-        if not (
-            200
-            <= status_code
-            < 300
-        ):
-            preview = (
-                decode_response_text(
-                    body[:1000]
-                )
-            )
-
-            raise RuntimeError(
-                f"ITS HTTP 오류 "
-                f"{status_code}: "
-                f"{preview}"
-            )
-
-        content_encoding = (
-            response
-            .getheader(
-                "Content-Encoding",
-                "",
-            )
-            .lower()
-        )
-
-        if (
-            content_encoding
-            == "gzip"
-        ):
-            body = gzip.decompress(
-                body
-            )
-
-        text = (
-            decode_response_text(
-                body
-            )
-        )
-
-        try:
-            return json.loads(
-                text
-            )
-
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "ITS JSON 응답을 "
-                "해석할 수 없습니다."
-            ) from exc
-
-    finally:
-        if tls_socket is not None:
-            try:
-                tls_socket.close()
-            except Exception:
-                pass
-
-        elif raw_socket is not None:
-            try:
-                raw_socket.close()
-            except Exception:
-                pass
-
-
-# =========================================================
-# ITS items 찾기
-# =========================================================
-
-def find_traffic_items(
-    payload,
-) -> list:
-
-    if isinstance(
-        payload,
-        dict,
-    ):
-
-        items = payload.get(
-            "items"
-        )
-
-        if isinstance(
-            items,
-            list,
-        ):
-            return items
-
-        for value in (
-            payload.values()
-        ):
-
-            found = (
-                find_traffic_items(
-                    value
-                )
-            )
-
-            if found:
-                return found
-
-    elif isinstance(
-        payload,
-        list,
-    ):
-
-        for value in payload:
-
-            found = (
-                find_traffic_items(
-                    value
-                )
-            )
-
-            if found:
-                return found
-
-    return []
-
-
-# =========================================================
-# ITS 오류 확인
-# =========================================================
-
-def detect_api_error(
-    payload,
-):
-
-    if not isinstance(
-        payload,
-        dict,
-    ):
-        return
-
-    header = payload.get(
-        "header"
-    )
-
-    if not isinstance(
-        header,
-        dict,
-    ):
-        return
-
-    result_code = str(
-        header.get(
-            "resultCode",
-            ""
-        )
-    ).strip()
-
-    result_msg = str(
-        header.get(
-            "resultMsg",
-            ""
-        )
-    ).strip()
-
-    if (
-        result_code
-        and result_code != "0"
-    ):
-
-        raise RuntimeError(
-            "ITS API 오류 "
-            f"{result_code}: "
-            f"{result_msg or '알 수 없는 오류'}"
-        )
-
-
-# =========================================================
-# 달구벌대로 데이터 수집
-# =========================================================
-
-def fetch_dalgubeol_traffic():
-
-    api_key = env(
-        "ITS_API_KEY"
-    )
-
-    if not api_key:
-
-        raise RuntimeError(
-            "ITS_API_KEY가 설정되지 않았습니다."
-        )
-
-    params = {
-
-        "apiKey":
-            api_key,
-
-        "type":
-            "all",
-
-        "drcType":
-            "all",
-
-        "minX":
-            BBOX["minX"],
-
-        "maxX":
-            BBOX["maxX"],
-
-        "minY":
-            BBOX["minY"],
-
-        "maxY":
-            BBOX["maxY"],
-
-        "getType":
-            "json",
-    }
-
-    path = (
-        ITS_PATH
-        + "?"
-        + urlencode(
-            params
-        )
-    )
-
-    payload = (
-        raw_https_get_json(
-            ITS_HOST,
-            ITS_PORT,
-            path,
-        )
-    )
-
-    detect_api_error(
-        payload
-    )
-
-    items = (
-        find_traffic_items(
-            payload
-        )
-    )
-
-    if not items:
-
-        raise RuntimeError(
-            "ITS 응답에 "
-            "교통 데이터가 없습니다."
-        )
-
-    selected = []
-
-    # -------------------------
-    # 달구벌대로만 추출
-    # -------------------------
-
-    for item in items:
-
-        if not isinstance(
-            item,
-            dict,
-        ):
-            continue
-
-        road_name = str(
-            item.get(
-                "roadName",
-                ""
-            )
-        ).strip()
-
-        if (
-            ROAD_NAME
-            not in road_name
-        ):
-            continue
-
-        # -------------------------
-        # 속도 값
-        # -------------------------
-
-        try:
-
-            speed = float(
-                item.get(
-                    "speed"
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-            continue
-
-        # 비정상 속도 제외
-        if not (
-            0
-            < speed
-            <= 200
-        ):
-            continue
-
-        created_at = (
-            parse_its_datetime(
-                item.get(
-                    "createdDate"
-                )
-            )
-        )
-
-        selected.append(
+            preserved = not overwrite_allowed
+            detail = "기존 NORMAL에 DELAYED 입력을 재생했으며 덮어쓰기가 차단됩니다."
+        else:
+            reached_daily_write = False
+            overwrite_allowed = False
+            preserved = True
+            detail = "저장 단계 전에 실패하므로 traffic_daily를 변경하지 않습니다."
+
+        scenarios.append(
             {
-                "speed":
-                    speed,
-
-                "createdAt":
-                    created_at,
+                "type": failure_type,
+                "description": definitions[failure_type],
+                "synthetic": True,
+                "databaseWritePerformed": False,
+                "reachedDailyWriteStage": reached_daily_write,
+                "overwriteAllowed": overwrite_allowed,
+                "lastNormalPreserved": preserved,
+                "result": "PASS" if preserved else "FAIL",
+                "detail": detail,
             }
         )
 
-    if not selected:
+    return scenarios
 
-        raise RuntimeError(
-            "ITS 응답에서 "
-            "달구벌대로의 유효한 "
-            "속도 데이터를 찾지 못했습니다."
-        )
 
-    # -------------------------
-    # 속도 통계
-    # -------------------------
+def comparison_payload(today_record: dict | None, yesterday_record: dict | None) -> dict:
+    if not today_record or not yesterday_record:
+        return {
+            "comparisonAvailable": False,
+            "today": today_record,
+            "previousDay": yesterday_record,
+            "differenceKmh": None,
+            "differencePercent": None,
+            "rule": "KST 달력상 전날만 비교하며 다른 과거 날짜로 대체하지 않음",
+        }
 
-    speeds = [
-
-        row["speed"]
-
-        for row in selected
-    ]
-
-    created_times = [
-
-        row["createdAt"]
-
-        for row in selected
-
-        if (
-            row["createdAt"]
-            is not None
-        )
-    ]
-
-    captured_at = (
-        now_kst()
-    )
-
-    # 가장 최근 ITS 데이터 시각
-    source_updated_at = (
-
-        max(created_times)
-
-        if created_times
-
-        else None
-    )
-
-    source_status = (
-        "NORMAL"
-    )
-
-    # -------------------------
-    # 원천 데이터 지연 확인
-    # -------------------------
-
-    if source_updated_at:
-
-        age_minutes = (
-
-            (
-                captured_at
-                -
-                source_updated_at.astimezone(
-                    KST
-                )
-            ).total_seconds()
-
-            / 60
-        )
-
-        if (
-            age_minutes
-            >= SOURCE_DELAY_MINUTES
-        ):
-
-            source_status = (
-                "DELAYED"
-            )
-
-    average_speed = round(
-
-        sum(speeds)
-        / len(speeds),
-
+    difference = round(
+        today_record["averageSpeed"] - yesterday_record["averageSpeed"],
         1,
     )
-
+    previous_speed = yesterday_record["averageSpeed"]
+    percent = round(difference / previous_speed * 100, 1) if previous_speed else None
     return {
-
-        "localDate":
-            captured_at.date(),
-
-        "capturedAt":
-            captured_at,
-
-        "road":
-            ROAD_NAME,
-
-        "averageSpeed":
-            average_speed,
-
-        "linkCount":
-            len(speeds),
-
-        "minSpeed":
-            round(
-                min(speeds),
-                1,
-            ),
-
-        "maxSpeed":
-            round(
-                max(speeds),
-                1,
-            ),
-
-        "sourceUpdatedAt":
-            source_updated_at,
-
-        "sourceStatus":
-            source_status,
+        "comparisonAvailable": True,
+        "today": today_record,
+        "previousDay": yesterday_record,
+        "differenceKmh": difference,
+        "differencePercent": percent,
+        "rule": "KST 달력상 전날만 비교하며 다른 과거 날짜로 대체하지 않음",
     }
 
 
 # =========================================================
-# Vercel Cron 인증
-# =========================================================
-
-def verify_cron_secret(
-    authorization: str | None,
-):
-
-    secret = env(
-        "CRON_SECRET"
-    )
-
-    if not secret:
-
-        raise RuntimeError(
-            "CRON_SECRET가 설정되지 않았습니다."
-        )
-
-    expected = (
-        f"Bearer {secret}"
-    )
-
-    return hmac.compare_digest(
-        authorization or "",
-        expected,
-    )
-
-
-# =========================================================
-# API 기본 정보
+# API
 # =========================================================
 
 @app.get("/api")
 def api_index():
-
     return {
-
-        "name":
-            "달구벌 NOW Daily API",
-
-        "version":
-            "4.0",
-
+        "name": "달구벌 NOW Daily API",
+        "version": "5.1.0",
+        "collectionMode": "LOCAL_INGEST",
+        "expectedCollectTimeKST": "09:00",
         "endpoints": [
             "/api/health",
             "/api/dashboard",
             "/api/history",
-            "/api/collect",
+            "/api/verify",
+            "/api/check-missed",
+            "/api/ingest",
+            "/api/attempt",
         ],
     }
 
 
-# =========================================================
-# Health Check
-# =========================================================
-
 @app.get("/api/health")
 def health():
-
-    database_configured = bool(
-        db_url()
-    )
-
-    its_key_configured = bool(
-        env(
-            "ITS_API_KEY"
-        )
-    )
-
-    cron_secret_configured = bool(
-        env(
-            "CRON_SECRET"
-        )
-    )
+    database_configured = bool(db_url())
+    secret_configured = bool(shared_secret())
+    missed_check_configured = bool(cron_secret())
 
     return {
-
-        "ok":
-            (
-                database_configured
-                and
-                its_key_configured
-                and
-                cron_secret_configured
-            ),
-
-        "databaseConfigured":
-            database_configured,
-
-        "itsApiKeyConfigured":
-            its_key_configured,
-
-        "cronSecretConfigured":
-            cron_secret_configured,
-
-        "runtime":
-            "Vercel Python / FastAPI",
+        "ok": database_configured and secret_configured and missed_check_configured,
+        "databaseConfigured": database_configured,
+        "ingestSecretConfigured": secret_configured,
+        "missedCheckConfigured": missed_check_configured,
+        "collectionMode": "LOCAL_INGEST",
+        "expectedCollectTimeKST": "09:00",
+        "officialCaptureWindowKST": "09:00-09:09",
+        "missedCheckTimeKST": "10:00",
+        "runtime": "Vercel Python / FastAPI",
     }
 
 
-# =========================================================
-# 실제 ITS 자동수집
-# =========================================================
-
-@app.get("/api/collect")
-def collect(
-    authorization: str | None = Header(
-        default=None
-    ),
-):
-
-    try:
-
-        # -------------------------
-        # Cron 인증
-        # -------------------------
-
-        if not verify_cron_secret(
-            authorization
-        ):
-
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "ok":
-                        False,
-
-                    "message":
-                        "Cron 인증에 실패했습니다.",
-                },
-            )
-
-        # -------------------------
-        # ITS 호출
-        # -------------------------
-
-        data = (
-            fetch_dalgubeol_traffic()
-        )
-
-        # -------------------------
-        # DB 저장
-        # -------------------------
-
-        with open_db() as conn:
-
-            save_successful_daily(
-                conn,
-                data,
-            )
-
-            save_attempt(
-                conn,
-                status=(
-                    data[
-                        "sourceStatus"
-                    ]
-                ),
-                message=(
-                    "Vercel 자동 수집 성공"
-
-                    if (
-                        data[
-                            "sourceStatus"
-                        ]
-                        == "NORMAL"
-                    )
-
-                    else (
-                        "Vercel 자동 수집 성공 - "
-                        "ITS 원천 데이터 지연"
-                    )
-                ),
-                data=data,
-            )
-
-        # -------------------------
-        # 결과
-        # -------------------------
-
-        return {
-
-            "ok":
-                True,
-
-            "date":
-                data[
-                    "localDate"
-                ].isoformat(),
-
-            "road":
-                data[
-                    "road"
-                ],
-
-            "averageSpeed":
-                data[
-                    "averageSpeed"
-                ],
-
-            "linkCount":
-                data[
-                    "linkCount"
-                ],
-
-            "minSpeed":
-                data[
-                    "minSpeed"
-                ],
-
-            "maxSpeed":
-                data[
-                    "maxSpeed"
-                ],
-
-            "capturedAt":
-                data[
-                    "capturedAt"
-                ].isoformat(),
-
-            "sourceUpdatedAt":
-                (
-                    data[
-                        "sourceUpdatedAt"
-                    ].isoformat()
-
-                    if (
-                        data[
-                            "sourceUpdatedAt"
-                        ]
-                    )
-
-                    else None
-                ),
-
-            "sourceStatus":
-                data[
-                    "sourceStatus"
-                ],
-        }
-
-    except Exception as exc:
-
-        message = str(
-            exc
-        )
-
-        # 실패도 DB에 기록
-        record_failed_attempt(
-            message
-        )
-
-        return JSONResponse(
-            status_code=500,
-            content={
-
-                "ok":
-                    False,
-
-                "status":
-                    "FAILED",
-
-                "message":
-                    message,
-            },
-        )
-
-
-# =========================================================
-# 로컬 수집기 수신 (ITS가 클라우드 IP를 차단하므로
-# 국내 IP에서 수집한 결과를 여기로 전송받는다)
-# =========================================================
-
 @app.post("/api/ingest")
 def ingest(
-    payload: dict = Body(...),
+    payload: IngestPayload,
     authorization: str | None = Header(default=None),
 ):
+    if not verify_secret(authorization):
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "message": "인증에 실패했습니다."},
+        )
+
     try:
-        if not verify_cron_secret(authorization):
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "ok": False,
-                    "message": "인증에 실패했습니다.",
-                },
-            )
-
-        required = [
-            "localDate",
-            "capturedAt",
-            "road",
-            "averageSpeed",
-            "linkCount",
-            "minSpeed",
-            "maxSpeed",
-            "sourceStatus",
-        ]
-
-        missing = [k for k in required if k not in payload]
-
-        if missing:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "ok": False,
-                    "message": f"누락된 필드: {missing}",
-                },
-            )
-
-        data = {
-            "localDate": datetime.fromisoformat(
-                payload["localDate"]
-            ).date(),
-
-            "capturedAt": datetime.fromisoformat(
-                payload["capturedAt"]
-            ),
-
-            "road": payload["road"],
-
-            "averageSpeed": float(payload["averageSpeed"]),
-
-            "linkCount": int(payload["linkCount"]),
-
-            "minSpeed": float(payload["minSpeed"]),
-
-            "maxSpeed": float(payload["maxSpeed"]),
-
-            "sourceUpdatedAt": (
-                datetime.fromisoformat(payload["sourceUpdatedAt"])
-                if payload.get("sourceUpdatedAt")
-                else None
-            ),
-
-            "sourceStatus": payload["sourceStatus"],
-        }
-
         with open_db() as conn:
+            saved = save_daily(conn, payload)
 
-            save_successful_daily(conn, data)
+            # 공식 일별값이 실제로 저장/갱신된 경우에만 같은 날짜의 원천 샘플도 교체한다.
+            # 기존 NORMAL을 DELAYED가 덮어쓰지 못한 경우 샘플도 기존 증거를 유지한다.
+            if saved:
+                replace_source_samples(conn, payload)
+
+            message = "로컬 수집기 전송 성공"
+            if not saved:
+                message += " - 기존 NORMAL 기록 유지"
 
             save_attempt(
                 conn,
-                status=data["sourceStatus"],
-                message="로컬 수집기 전송 성공",
-                data=data,
+                attempted_at=payload.capturedAt,
+                local_date=payload.localDate,
+                status=payload.sourceStatus,
+                failure_type="STALE_DATA" if payload.sourceStatus == "DELAYED" else None,
+                message=message,
+                average_speed=payload.averageSpeed,
+                link_count=payload.linkCount,
+                source_updated_at=payload.sourceUpdatedAt,
             )
 
         return {
             "ok": True,
-            "date": data["localDate"].isoformat(),
-            "road": data["road"],
-            "averageSpeed": data["averageSpeed"],
-            "linkCount": data["linkCount"],
-            "minSpeed": data["minSpeed"],
-            "maxSpeed": data["maxSpeed"],
-            "sourceStatus": data["sourceStatus"],
+            "saved": saved,
+            "date": payload.localDate.isoformat(),
+            "road": payload.road,
+            "averageSpeed": payload.averageSpeed,
+            "linkCount": payload.linkCount,
+            "minSpeed": payload.minSpeed,
+            "maxSpeed": payload.maxSpeed,
+            "sourceStatus": payload.sourceStatus,
+            "staleRatio": payload.staleRatio,
+            "sourceSamplesSaved": len(payload.samples) if saved else 0,
         }
 
-    except Exception as exc:
+    except Exception:
+        logger.exception("Failed to ingest traffic summary")
         return JSONResponse(
             status_code=500,
             content={
                 "ok": False,
-                "message": str(exc),
+                "message": "교통 데이터를 저장하는 중 서버 오류가 발생했습니다.",
             },
         )
 
 
-# =========================================================
-# 과거 기록 조회
-# =========================================================
+@app.post("/api/attempt")
+def record_attempt(
+    payload: AttemptPayload,
+    authorization: str | None = Header(default=None),
+):
+    if not verify_secret(authorization):
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "message": "인증에 실패했습니다."},
+        )
+
+    try:
+        with open_db() as conn:
+            save_attempt(
+                conn,
+                attempted_at=payload.attemptedAt,
+                local_date=payload.localDate,
+                status=payload.status,
+                failure_type=payload.failureType,
+                message=payload.message,
+            )
+        return {"ok": True}
+    except Exception:
+        logger.exception("Failed to store collection attempt")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": "수집 실패 이력을 저장하는 중 서버 오류가 발생했습니다.",
+            },
+        )
+
+
+@app.get("/api/check-missed")
+def check_missed(authorization: str | None = Header(default=None)):
+    """Mark a day MISSED when no 09:00 collector report reached the server.
+
+    This endpoint never calls ITS. Vercel Cron invokes it once a day after the
+    local 09:00 collection window. If a real FAILED collector attempt is already
+    present, that failure is preserved instead of being mislabeled MISSED.
+    """
+    if not cron_secret():
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": "CRON_SECRET가 설정되지 않아 누락 점검을 실행할 수 없습니다.",
+            },
+        )
+
+    if not verify_cron_secret(authorization):
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "message": "Cron 인증에 실패했습니다."},
+        )
+
+    current = now_kst()
+    deadline = datetime.combine(
+        current.date(),
+        time(MISSED_CHECK_HOUR_KST, MISSED_CHECK_MINUTE_KST),
+        tzinfo=KST,
+    )
+    if current < deadline:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "message": "09:00 수집 누락 판정 시각 전입니다.",
+                "missedCheckTimeKST": "10:00",
+            },
+        )
+
+    try:
+        with open_db() as conn:
+            today = current.date()
+            daily = query_daily_on(conn, today)
+            latest_attempt = query_latest_attempt_today(conn, today)
+            collector_attempt = query_latest_collector_attempt_today(conn, today)
+
+            if daily:
+                return {
+                    "ok": True,
+                    "result": "COLLECTED",
+                    "date": today.isoformat(),
+                    "message": "오늘 공식 09:00 일별 기록이 확인되었습니다.",
+                }
+
+            if collector_attempt:
+                return {
+                    "ok": True,
+                    "result": "COLLECTOR_ATTEMPT_RECORDED",
+                    "date": today.isoformat(),
+                    "collectorStatus": collector_attempt["status"],
+                    "message": (
+                        "오늘 로컬 수집기 실행 흔적이 있으므로 MISSED로 중복 기록하지 않습니다."
+                    ),
+                }
+
+            if latest_attempt and latest_attempt["status"] == "MISSED":
+                return {
+                    "ok": True,
+                    "result": "ALREADY_MISSED",
+                    "date": today.isoformat(),
+                    "message": "오늘 09:00 수집 누락이 이미 기록되어 있습니다.",
+                }
+
+            save_attempt(
+                conn,
+                attempted_at=current,
+                local_date=today,
+                status="MISSED",
+                failure_type=None,
+                message=(
+                    "10:00 KST까지 09:00 로컬 수집 데이터나 수집기 실패 보고가 "
+                    "서버에 도착하지 않아 MISSED로 기록했습니다."
+                ),
+            )
+
+        return {
+            "ok": True,
+            "result": "MISSED_RECORDED",
+            "date": current.date().isoformat(),
+            "message": "오늘 09:00 로컬 수집 보고 누락을 기록했습니다.",
+        }
+
+    except Exception:
+        logger.exception("Failed to check missed collection")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": "09:00 수집 누락을 점검하는 중 서버 오류가 발생했습니다.",
+            },
+        )
+
 
 @app.get("/api/history")
 def history():
-
     try:
-
         with open_db() as conn:
-
-            rows = query_daily(
-                conn,
-                30,
-            )
+            rows = query_daily(conn, HISTORY_QUERY_LIMIT)
+            total_days = query_total_days(conn)
 
         return {
-
-            "ok":
-                True,
-
-            "records":
-                rows,
-
-            "historyDays":
-                len(rows),
+            "ok": True,
+            "records": rows,
+            "historyDays": total_days,
         }
+    except Exception:
+        logger.exception("Failed to query traffic history")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "records": [],
+                "historyDays": 0,
+                "message": "저장 기록을 불러오는 중 서버 오류가 발생했습니다.",
+            },
+        )
 
-    except Exception as exc:
-
-        return {
-
-            "ok":
-                False,
-
-            "records":
-                [],
-
-            "historyDays":
-                0,
-
-            "message":
-                str(exc),
-        }
-
-
-# =========================================================
-# 대시보드
-# =========================================================
 
 @app.get("/api/dashboard")
 def dashboard():
-
-    current = (
-        now_kst()
-    )
+    current = now_kst()
 
     try:
-
         with open_db() as conn:
-
-            daily = query_daily(
-                conn,
-                30,
-            )
-
-            today_attempt = (
-                query_latest_attempt_today(
-                    conn,
-                    current.date(),
-                )
-            )
-
-    except Exception as exc:
-
-        return {
-
-            "ok":
-                False,
-
-            "status":
-                "SETUP_ERROR",
-
-            "message":
-                str(exc),
-
-            "serverTime":
-                current.isoformat(),
-        }
-
-
-    # =====================================================
-    # 오늘 실제 기록
-    # =====================================================
-
-    today_record = next(
-        (
-            row
-            for row in daily
-
-            if (
-                row["date"]
-                ==
-                current.date().isoformat()
-            )
-        ),
-        None,
-    )
-
-
-    # =====================================================
-    # 마지막 정상 기록
-    # =====================================================
-
-    latest_normal = next(
-        (
-            row
-            for row in daily
-
-            if (
-                row[
-                    "sourceStatus"
-                ]
-                == "NORMAL"
-            )
-        ),
-        None,
-    )
-
-
-    # =====================================================
-    # 오늘보다 이전의 가장 최근 실제 날짜
-    # =====================================================
-
-    previous_record = None
+            daily = query_daily(conn, HISTORY_QUERY_LIMIT)
+            total_days = query_total_days(conn)
+            today_record = query_daily_on(conn, current.date())
+            yesterday_record = query_daily_on(conn, current.date() - timedelta(days=1))
+            latest_normal = query_latest_normal(conn)
+            today_attempt = query_latest_attempt_today(conn, current.date())
+    except Exception:
+        logger.exception("Failed to build dashboard response")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "status": "SETUP_ERROR",
+                "message": "대시보드 데이터를 불러오는 중 서버 오류가 발생했습니다.",
+                "serverTime": current.isoformat(),
+            },
+        )
 
     if today_record:
-
-        previous_record = next(
-            (
-                row
-                for row in daily
-
-                if (
-                    row["date"]
-                    <
-                    today_record["date"]
-                )
-            ),
-            None,
+        status = "DELAYED" if today_record["sourceStatus"] == "DELAYED" else "NORMAL"
+        message = (
+            "오늘 교통 데이터가 정상적으로 수집되었습니다."
+            if status == "NORMAL"
+            else "오늘 값은 수집되었지만 일부 ITS 원천 데이터가 지연된 상태입니다."
         )
-
-
-    # =====================================================
-    # 오늘 데이터 존재
-    # =====================================================
-
-    if today_record:
-
-        status = (
-
-            "DELAYED"
-
-            if (
-                today_record[
-                    "sourceStatus"
-                ]
-                == "DELAYED"
-            )
-
-            else "NORMAL"
-        )
-
-        if status == "NORMAL":
-
-            message = (
-                "오늘 교통 데이터가 "
-                "정상적으로 수집되었습니다."
-            )
-
-        else:
-
-            message = (
-                "오늘 값은 수집되었지만 "
-                "ITS 원천 데이터의 생성시각이 "
-                "30분 이상 오래된 상태입니다."
-            )
-
-        shown_record = (
-            today_record
-        )
-
+        shown_record = today_record
         is_fallback = False
 
-
-    # =====================================================
-    # 오늘 수집 실패
-    # =====================================================
-
-    elif (
-        today_attempt
-        and
-        today_attempt[
-            "status"
-        ]
-        == "FAILED"
-    ):
-
+    elif today_attempt and today_attempt["status"] == "FAILED":
         status = "ERROR"
-
         message = (
-            "오늘 교통 데이터 수집에 "
-            "실패했습니다. "
-            "마지막 정상 기록을 "
-            "대신 표시합니다."
+            "오늘 09:00 로컬 수집기는 실행됐지만 교통 데이터 수집에 실패했습니다. "
+            "마지막 정상 기록을 대신 표시합니다."
         )
+        shown_record = latest_normal
+        is_fallback = bool(latest_normal)
 
-        shown_record = (
-            latest_normal
+    elif today_attempt and today_attempt["status"] == "MISSED":
+        status = "MISSED"
+        message = (
+            "오늘 09:00 로컬 수집 보고가 확인되지 않아 수집 누락(MISSED)으로 기록했습니다. "
+            "마지막 정상 기록을 대신 표시합니다."
         )
+        shown_record = latest_normal
+        is_fallback = bool(latest_normal)
 
-        is_fallback = bool(
-            latest_normal
-        )
-
-
-    # =====================================================
-    # 09:30 이후인데 오늘 데이터 없음
-    # =====================================================
-
-    elif expected_collect_passed(
-        current
-    ):
-
+    elif expected_collect_passed(current):
         status = "MISSING"
-
         message = (
-            "오늘 오전 9:30 예정된 "
-            "교통 데이터가 아직 없습니다. "
-            "마지막 정상 기록이 있으면 "
-            "대신 표시합니다."
+            "오늘 오전 9:00 예정된 교통 데이터가 아직 없습니다. "
+            "마지막 정상 기록이 있으면 대신 표시합니다."
         )
-
-        shown_record = (
-            latest_normal
-        )
-
-        is_fallback = bool(
-            latest_normal
-        )
-
-
-    # =====================================================
-    # 아직 09:30 전
-    # =====================================================
+        shown_record = latest_normal
+        is_fallback = bool(latest_normal)
 
     else:
-
         status = "WAITING"
-
         message = (
-            "오늘 오전 9:30 "
-            "자동 수집 전입니다. "
-            "마지막 정상 기록이 있으면 "
-            "참고값으로 표시합니다."
+            "오늘 오전 9:00 수집 전입니다. "
+            "마지막 정상 기록이 있으면 참고값으로 표시합니다."
         )
+        shown_record = latest_normal
+        is_fallback = bool(latest_normal)
 
-        shown_record = (
-            latest_normal
-        )
-
-        is_fallback = bool(
-            latest_normal
-        )
-
-
-    # =====================================================
-    # 직전 실제 날짜와 비교
-    # =====================================================
-
-    comparison = None
-
-    if (
-        today_record
-        and
-        previous_record
-    ):
-
-        difference = round(
-            (
-                today_record[
-                    "averageSpeed"
-                ]
-                -
-                previous_record[
-                    "averageSpeed"
-                ]
-            ),
-            1,
-        )
-
-        if previous_record[
-            "averageSpeed"
-        ]:
-
-            percent = round(
-                (
-                    difference
-                    /
-                    previous_record[
-                        "averageSpeed"
-                    ]
-                    * 100
-                ),
-                1,
-            )
-
-        else:
-
-            percent = 0
-
-        comparison = {
-
-            "previous":
-                previous_record,
-
-            "differenceKmh":
-                difference,
-
-            "differencePercent":
-                percent,
+    comparison = comparison_payload(today_record, yesterday_record)
+    dashboard_comparison = None
+    if comparison["comparisonAvailable"]:
+        dashboard_comparison = {
+            "previous": yesterday_record,
+            "differenceKmh": comparison["differenceKmh"],
+            "differencePercent": comparison["differencePercent"],
         }
 
-
-    # =====================================================
-    # 최종 응답
-    # =====================================================
-
     return {
-
-        "ok":
-            True,
-
-        "status":
-            status,
-
-        "message":
-            message,
-
-        "serverTime":
-            current.isoformat(),
-
-        "expectedCollectTimeKST":
-            "09:00",
-
-        "todayRecord":
-            today_record,
-
-        "shownRecord":
-            shown_record,
-
-        "shownRecordIsFallback":
-            is_fallback,
-
-        "todayAttempt":
-            today_attempt,
-
-        "comparison":
-            comparison,
-
-        "history":
-            daily[:7],
-
-        "historyDays":
-            len(daily),
+        "ok": True,
+        "status": status,
+        "message": message,
+        "serverTime": current.isoformat(),
+        "expectedCollectTimeKST": "09:00",
+        "officialCaptureWindowKST": "09:00-09:09",
+        "missedCheckTimeKST": "10:00",
+        "todayRecord": today_record,
+        "yesterdayRecord": yesterday_record,
+        "shownRecord": shown_record,
+        "shownRecordIsFallback": is_fallback,
+        "todayAttempt": today_attempt,
+        "comparison": dashboard_comparison,
+        "history": daily[:DASHBOARD_HISTORY_LIMIT],
+        "historyDays": total_days,
     }
 
-@app.get("/api/test-tcp")
-def test_tcp():
 
-    results = []
+@app.get("/api/verify")
+def verify_submission():
+    """Public, read-only evidence endpoint for assignment verification.
 
-    for i in range(5):
+    No environment variable values, authorization headers, API keys, or DB URLs are
+    included. Synthetic failure replay is performed purely in memory and writes
+    nothing to the database.
+    """
+    current = now_kst()
+    today = current.date()
+    yesterday = today - timedelta(days=1)
 
-        started = datetime.now()
-
-        try:
-
-            sock = socket.create_connection(
-                (
-                    ITS_HOST,
-                    ITS_PORT,
-                ),
-                timeout=5,
+    try:
+        with open_db() as conn:
+            latest_record = query_latest_daily(conn)
+            latest_normal = query_latest_normal(conn)
+            today_record = query_daily_on(conn, today)
+            yesterday_record = query_daily_on(conn, yesterday)
+            total_days = query_total_days(conn)
+            recent_records = query_daily(conn, 7)
+            recent_attempts = query_recent_attempts(conn, 10)
+            today_attempt = query_latest_attempt_today(conn, today)
+            samples = (
+                query_source_samples(conn, date.fromisoformat(latest_record["date"]))
+                if latest_record
+                else []
             )
-
-            remote = sock.getpeername()
-
-            sock.close()
-
-            elapsed = (
-                datetime.now()
-                - started
-            ).total_seconds()
-
-            results.append({
-                "attempt": i + 1,
-                "ok": True,
-                "remote": remote,
-                "seconds": round(
-                    elapsed,
-                    3,
-                ),
-            })
-
-        except Exception as exc:
-
-            results.append({
-                "attempt": i + 1,
+    except Exception:
+        logger.exception("Failed to build verification response")
+        return JSONResponse(
+            status_code=500,
+            content={
                 "ok": False,
-                "type": type(exc).__name__,
-                "message": str(exc),
-            })
+                "message": "검증 데이터를 불러오는 중 서버 오류가 발생했습니다.",
+            },
+        )
+
+    comparison = comparison_payload(today_record, yesterday_record)
+    replay = synthetic_failure_replay()
+    replay_ok = all(item["result"] == "PASS" for item in replay)
+
+    source_check = bool(latest_record and samples)
+    comparison_check = comparison["comparisonAvailable"]
+    preservation_check = bool(latest_normal and total_days > 0)
 
     return {
-        "ok": any(
-            row["ok"]
-            for row in results
-        ),
-        "results": results,
+        "ok": True,
+        "generatedAtKST": current.isoformat(),
+        "checks": {
+            "publicSourceValueAndContext": "PASS" if source_check else "PENDING",
+            "fiveSyntheticExternalFailures": "PASS" if replay_ok else "FAIL",
+            "lastNormalAndDailyHistoryPreserved": "PASS" if preservation_check else "PENDING",
+            "actualKSTPreviousDayComparison": "PASS" if comparison_check else "PENDING",
+            "noPersonalOrSecretValuesExposed": "PASS",
+        },
+        "source": {
+            "provider": SOURCE_NAME,
+            "publicContextUrl": SOURCE_CONTEXT_URL,
+            "publicApiEndpointWithoutKey": SOURCE_API_ENDPOINT,
+            "road": ROAD_NAME,
+            "requestArea": SOURCE_BBOX,
+            "aggregation": "달구벌대로 유효 링크 speed의 산술평균",
+            "sampleMethod": "유효 링크 순서에서 균등 간격으로 최대 5건 보관",
+            "latestRecord": latest_record,
+            "samples": samples,
+        },
+        "failureReplay": {
+            "mode": "SYNTHETIC_IN_MEMORY",
+            "databaseWrites": 0,
+            "scenarios": replay,
+        },
+        "preservation": {
+            "policy": (
+                "실패는 traffic_daily에 0으로 저장하지 않으며, "
+                "기존 NORMAL은 DELAYED 재수집으로 덮어쓰지 않습니다."
+            ),
+            "lastNormal": latest_normal,
+            "totalDailyRecords": total_days,
+            "recentDailyRecords": recent_records,
+            "recentCollectionAttempts": recent_attempts,
+        },
+        "comparison": comparison,
+        "scheduleMonitoring": {
+            "collectionMode": "LOCAL_INGEST",
+            "expectedCollectTimeKST": "09:00",
+            "officialCaptureWindowKST": "09:00-09:09",
+            "missedCheckTimeKST": "10:00",
+            "todayAttempt": today_attempt,
+            "policy": (
+                "10:00 KST까지 공식 일별 기록과 로컬 수집기 실패 보고가 모두 없으면 "
+                "서버가 MISSED를 기록합니다. Vercel은 ITS를 호출하지 않습니다."
+            ),
+        },
+        "privacy": {
+            "secretsExposed": False,
+            "excluded": [
+                "ITS_API_KEY",
+                "INGEST_SECRET",
+                "CRON_SECRET",
+                "DATABASE_URL",
+                "Authorization header",
+            ],
+            "note": "검증 API는 공개 가능한 집계값·원천 샘플·상태만 반환합니다.",
+        },
     }

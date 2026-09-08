@@ -25,6 +25,8 @@ from traffic_core import (
 
 ITS_URL = "https://openapi.its.go.kr:9443/trafficInfo"
 HTTP_TIMEOUT_SECONDS = 60
+OFFICIAL_HOUR_KST = 9
+OFFICIAL_LAST_MINUTE_KST = 9
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 
 
@@ -63,6 +65,14 @@ def attempt_url() -> str:
     if ingest.endswith("/ingest"):
         return ingest.removesuffix("/ingest") + "/attempt"
     return ingest + "/attempt"
+
+
+def in_official_collection_window(current) -> bool:
+    """Only 09:00-09:09 KST may become an official daily record."""
+    return (
+        current.hour == OFFICIAL_HOUR_KST
+        and 0 <= current.minute <= OFFICIAL_LAST_MINUTE_KST
+    )
 
 
 def fetch_its() -> dict:
@@ -162,6 +172,14 @@ def report_failure(message: str, failure_type: str | None = None) -> None:
 def main() -> int:
     started = now_kst()
     print(f"=== 수집 시작 {started.strftime('%Y-%m-%d %H:%M:%S')} KST ===")
+
+    if not in_official_collection_window(started):
+        print(
+            "\n[중단] 공식 일별 수집은 KST 09:00~09:09에만 실행됩니다. "
+            "늦게 실행한 현재값을 09:00 데이터로 저장하지 않습니다.",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         payload = fetch_its()

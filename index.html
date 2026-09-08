@@ -605,7 +605,7 @@ function paintPill(status, text){
   el.className = "pill";
   if (status === "NORMAL") el.classList.add("is-normal");
   else if (status === "DELAYED") el.classList.add("is-delayed");
-  else if (status === "ERROR" || status === "SETUP_ERROR") el.classList.add("is-error");
+  else if (status === "ERROR" || status === "SETUP_ERROR" || status === "MISSED") el.classList.add("is-error");
   document.getElementById("pillText").textContent = text;
 }
 
@@ -614,7 +614,7 @@ function paintNotice(status, message){
   if (!message){ host.innerHTML = ""; return; }
   var cls = "notice";
   if (status === "DELAYED") cls += " is-delayed";
-  if (status === "ERROR" || status === "SETUP_ERROR") cls += " is-error";
+  if (status === "ERROR" || status === "SETUP_ERROR" || status === "MISSED") cls += " is-error";
   var div = document.createElement("div");
   div.className = cls;
   div.textContent = message;
@@ -873,7 +873,8 @@ function paintAll(data){
   paintPill(data.status, data.status === "NORMAL" ? "오늘 수집 완료"
     : data.status === "DELAYED" ? "원천 데이터 지연"
     : data.status === "WAITING" ? "수집 대기 중"
-    : data.status === "MISSING" ? "오늘 기록 없음"
+    : data.status === "MISSING" ? "수집 확인 대기"
+    : data.status === "MISSED" ? "09:00 수집 누락"
     : "확인 필요");
   paintNotice(data.status, data.message);
   paintHero(data);

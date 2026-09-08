@@ -78,3 +78,12 @@ aleph-traffic/
 ├── .gitignore                   # 비밀/로컬 파일 제외
 └── README.md                    # 프로젝트 설명 + 배포/운영 체크리스트
 ```
+
+
+## MISSED 자동 감시 추가 설정
+
+- Vercel Production 환경변수에 `CRON_SECRET`을 추가합니다. `INGEST_SECRET`과 다른 임의의 긴 값이어도 됩니다.
+- 업데이트된 `schema.sql`을 Neon SQL Editor에서 다시 실행해 `MISSED` 상태 제약을 반영합니다.
+- `vercel.json`의 Cron은 `0 1 * * *`이며, 이는 KST 10:00입니다. 이 Cron은 ITS를 호출하지 않고 `/api/check-missed`로 DB만 확인합니다.
+- 배포 후 `/api/health`에서 `missedCheckConfigured: true`인지 확인합니다.
+- 공식 수집은 KST 09:00~09:09에 시작된 로컬 수집만 허용됩니다.

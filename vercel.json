@@ -9,5 +9,11 @@
       "source": "/api/:path*",
       "destination": "/api/index"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/check-missed",
+      "schedule": "0 1 * * *"
+    }
   ]
 }

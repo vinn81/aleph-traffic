@@ -30,7 +30,7 @@ Neon DB 조회
 오늘 / 전날 비교
 ```
 
-Vercel은 ITS를 직접 호출하지 않습니다. `vercel.json`에도 Cron 설정이 없습니다.
+Vercel은 ITS를 직접 호출하지 않습니다. 다만 매일 **10:00 KST에 DB만 확인하는 Vercel Cron**이 `/api/check-missed`를 호출해, 09:00 로컬 수집 데이터와 실패 보고가 모두 없으면 `MISSED`를 기록합니다.
 
 ## 파일 구조
 
@@ -59,11 +59,12 @@ Vercel Production 환경에는 다음 값이 필요합니다.
 ```text
 DATABASE_URL
 INGEST_SECRET
+CRON_SECRET
 ```
 
 기존에 `CRON_SECRET`을 사용하고 있다면 그대로 두어도 호환됩니다. 새 설정에서는 의미가 더 명확한 `INGEST_SECRET`을 권장합니다.
 
-**Vercel에는 `ITS_API_KEY`가 필요하지 않습니다.** ITS 호출은 로컬 수집기만 수행합니다.
+**Vercel에는 `ITS_API_KEY`가 필요하지 않습니다.** ITS 호출은 로컬 수집기만 수행합니다. `CRON_SECRET`은 ITS 수집용이 아니라 10:00 누락 점검 Cron 인증에만 사용합니다.
 
 ## 2. Neon DB 초기화
 
@@ -96,8 +97,11 @@ https://YOUR_PROJECT.vercel.app/api/health
   "ok": true,
   "databaseConfigured": true,
   "ingestSecretConfigured": true,
+  "missedCheckConfigured": true,
   "collectionMode": "LOCAL_INGEST",
   "expectedCollectTimeKST": "09:00",
+  "officialCaptureWindowKST": "09:00-09:09",
+  "missedCheckTimeKST": "10:00",
   "runtime": "Vercel Python / FastAPI"
 }
 ```
@@ -144,7 +148,7 @@ python collect_local.py
 
 ## 6. 매일 09:00 자동 실행
 
-과제 조건에 맞춰 로컬 환경의 스케줄러를 **매일 오전 09:00 KST**로 설정합니다.
+과제 조건에 맞춰 로컬 환경의 스케줄러를 **매일 오전 09:00 KST**로 설정합니다. 공식 일별 기록은 09:00~09:09 KST에 시작된 수집만 허용합니다. 그 이후 실행한 현재값을 09:00 값으로 저장하지 않습니다.
 
 Windows라면 작업 스케줄러에서 다음 형태로 등록할 수 있습니다.
 
@@ -169,15 +173,18 @@ Windows라면 작업 스케줄러에서 다음 형태로 등록할 수 있습니
 
 수집 시도 자체는 `collection_attempts`에 별도로 기록됩니다.
 
-## 8. 수집 실패 기록
+## 8. 수집 실패 및 MISSED 기록
 
-로컬에서 ITS 호출이나 요약 처리에 실패하면 수집기가 `/api/attempt`로 실패 이력을 전송합니다.
+로컬에서 ITS 호출이나 요약 처리에 실패하면 수집기가 `/api/attempt`로 `FAILED` 이력을 전송합니다.
+
+매일 10:00 KST에는 Vercel Cron이 `/api/check-missed`를 호출합니다. 이 엔드포인트는 ITS를 호출하지 않고 DB만 확인합니다. 오늘의 공식 일별 기록도 없고 로컬 수집기의 `FAILED` 보고도 없다면 `MISSED`를 기록합니다. 따라서 PC 전원 꺼짐, 작업 스케줄러 미실행, 로컬 측에서 서버까지 아무 보고도 도착하지 않은 경우를 운영상 `MISSED`로 구분합니다.
 
 따라서 대시보드는 오전 09:00 이후 데이터가 없을 때 다음을 구분할 수 있습니다.
 
 ```text
-수집 시도 자체가 실패함 → ERROR
-실패 이력도 없고 데이터도 없음 → MISSING
+수집기는 실행됐지만 ITS/API 실패 → ERROR / FAILED
+09:00 이후 아직 10:00 누락 점검 전 → MISSING
+10:00까지 데이터·실패 보고 모두 없음 → MISSED
 ```
 
 실패 이력 전송까지 네트워크 문제로 실패한 경우에는 로컬 콘솔 로그를 확인해야 합니다.
@@ -237,6 +244,7 @@ GET  /api/health      설정 상태
 GET  /api/dashboard   메인 화면 데이터
 GET  /api/history     최근 30개 기록 + 전체 기록일 수
 GET  /api/verify      제출 조건 검증용 읽기 전용 증거 API
+GET  /api/check-missed 10:00 KST 누락 점검 (Vercel Cron 전용)
 POST /api/ingest      로컬 수집 성공값 수신 (인증 필요)
 POST /api/attempt     로컬 수집 실패 이력 수신 (인증 필요)
 ```
@@ -299,3 +307,8 @@ https://YOUR_PROJECT.vercel.app/verify
 `collect_local.py`가 실제 ITS 응답에서 달구벌대로 유효 링크를 추린 뒤, 순서상 균등 간격으로 최대 5건을 `traffic_source_samples`에 저장합니다. API 키는 저장하지 않습니다.
 
 기존 DB를 사용 중이라면 업데이트된 `schema.sql`을 Neon SQL Editor에서 다시 한 번 실행해야 `failure_type` 컬럼과 `traffic_source_samples` 테이블이 추가됩니다. 기존 `traffic_daily` 데이터는 삭제되지 않습니다.
+
+
+## 17. PC가 꺼져 있을 때의 동작
+
+09:00에 로컬 PC가 꺼져 있으면 수집기 자체가 실행되지 않으므로 ITS 요청과 `/api/attempt` 보고가 모두 없습니다. 10:00 KST의 Vercel Cron이 이를 확인해 `collection_attempts.status = MISSED`를 기록합니다. 이후 PC를 켜 11:00에 수동 실행하더라도 `collect_local.py`와 서버가 09:00~09:09 이외의 공식 저장을 거부하므로, 11:00 현재값이 09:00 데이터로 위장되어 저장되지 않습니다.
