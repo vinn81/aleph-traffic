@@ -1,111 +1,67 @@
+"""달구벌대로 교통정보 로컬 수집기.
+
+매일 09:00 KST에 국내 일반 회선에서 실행하는 것을 전제로 한다.
+ITS 원본 데이터는 로컬에서 조회하고, 요약 결과만 Vercel API로 전송한다.
+
+필수 환경변수:
+    ITS_API_KEY    ITS 오픈API 인증키
+    INGEST_URL     예: https://your-app.vercel.app/api/ingest
+    INGEST_SECRET  서버와 공유하는 비밀값 (기존 CRON_SECRET도 호환)
+
+선택 환경변수:
+    ATTEMPT_URL    실패 이력을 보낼 주소. 미설정 시 INGEST_URL에서 자동 추론
 """
-달구벌대로 교통정보 로컬 수집기
 
-ITS가 클라우드 데이터센터 IP를 차단하므로 국내 일반 회선에서
-데이터를 수집한 뒤, 요약 결과만 Vercel /api/ingest 로 전송한다.
-
-실행:
-    python collect_local.py
-
-환경변수 (필수):
-    ITS_API_KEY   ITS 오픈API 인증키
-    CRON_SECRET   Vercel에 설정된 값과 동일해야 함
-    INGEST_URL    예: https://your-app.vercel.app/api/ingest
-"""
+from __future__ import annotations
 
 import json
 import os
 import sys
-import urllib.request
 import urllib.error
-from datetime import datetime
+import urllib.request
 from urllib.parse import urlencode
-from zoneinfo import ZoneInfo
 
-# =========================================================
-# 설정 (api/index.py 와 동일하게 유지할 것)
-# =========================================================
-
-KST = ZoneInfo("Asia/Seoul")
-
-ROAD_NAME = "달구벌대로"
+from traffic_core import BBOX, ROAD_NAME, now_kst, summarize_traffic
 
 ITS_URL = "https://openapi.its.go.kr:9443/trafficInfo"
-
-BBOX = {
-    "minX": 128.40,
-    "maxX": 128.80,
-    "minY": 35.75,
-    "maxY": 36.00,
-}
-
-SOURCE_DELAY_MINUTES = 30
-
-HTTP_TIMEOUT = 60
+HTTP_TIMEOUT_SECONDS = 60
+MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 
 
-# =========================================================
-# 유틸
-# =========================================================
-
-def env(name: str) -> str:
+def require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
         raise RuntimeError(f"환경변수 {name} 가 설정되지 않았습니다.")
     return value
 
 
-def now_kst() -> datetime:
-    return datetime.now(KST)
-
-
-def parse_its_datetime(value):
+def ingest_secret() -> str:
+    value = (
+        os.environ.get("INGEST_SECRET", "").strip()
+        or os.environ.get("CRON_SECRET", "").strip()
+    )
     if not value:
-        return None
-
-    text = str(value).strip()
-
-    for fmt in ("%Y%m%d%H%M%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(text, fmt).replace(tzinfo=KST)
-        except ValueError:
-            continue
-
-    return None
+        raise RuntimeError(
+            "환경변수 INGEST_SECRET가 설정되지 않았습니다. "
+            "기존 CRON_SECRET도 사용할 수 있습니다."
+        )
+    return value
 
 
-def find_traffic_items(payload):
-    """ITS 응답 구조가 바뀌어도 items 배열을 찾아낸다."""
-    if isinstance(payload, dict):
-        body = payload.get("body")
-        if isinstance(body, dict):
-            items = body.get("items")
-            if isinstance(items, list):
-                return items
+def attempt_url() -> str:
+    explicit = os.environ.get("ATTEMPT_URL", "").strip()
+    if explicit:
+        return explicit
 
-        items = payload.get("items")
-        if isinstance(items, list):
-            return items
+    ingest = require_env("INGEST_URL").rstrip("/")
+    if ingest.endswith("/ingest"):
+        return ingest.removesuffix("/ingest") + "/attempt"
+    return ingest + "/attempt"
 
-        for value in payload.values():
-            found = find_traffic_items(value)
-            if found:
-                return found
-
-    if isinstance(payload, list):
-        if payload and isinstance(payload[0], dict):
-            return payload
-
-    return []
-
-
-# =========================================================
-# 1. ITS 호출
-# =========================================================
 
 def fetch_its() -> dict:
     params = {
-        "apiKey": env("ITS_API_KEY"),
+        "apiKey": require_env("ITS_API_KEY"),
         "type": "all",
         "drcType": "all",
         "minX": BBOX["minX"],
@@ -114,150 +70,66 @@ def fetch_its() -> dict:
         "maxY": BBOX["maxY"],
         "getType": "json",
     }
-
     url = ITS_URL + "?" + urlencode(params)
 
     print("[1/3] ITS 호출 중...")
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
 
-    request = urllib.request.Request(
-        url,
-        headers={"Accept": "application/json"},
-    )
+    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        raw = response.read(MAX_RESPONSE_BYTES + 1)
 
-    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-        raw = response.read()
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise RuntimeError("ITS 응답 크기가 허용 범위를 초과했습니다.")
 
     print(f"      수신 {len(raw):,} bytes")
 
-    payload = json.loads(raw.decode("utf-8"))
-
-    header = payload.get("header", {})
-    result_code = str(header.get("resultCode", "0"))
-
-    if result_code not in ("0", "00"):
-        raise RuntimeError(
-            f"ITS 오류 resultCode={result_code} "
-            f"resultMsg={header.get('resultMsg')}"
-        )
-
-    return payload
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("ITS JSON 응답을 해석할 수 없습니다.") from exc
 
 
-# =========================================================
-# 2. 달구벌대로 추출 및 통계
-# =========================================================
-
-def summarize(payload: dict) -> dict:
-    items = find_traffic_items(payload)
-
-    if not items:
-        raise RuntimeError("ITS 응답에 교통 데이터가 없습니다.")
-
-    print(f"[2/3] 전체 {len(items):,}건에서 {ROAD_NAME} 추출 중...")
-
-    speeds = []
-    created_times = []
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        road_name = str(item.get("roadName", "")).strip()
-
-        if ROAD_NAME not in road_name:
-            continue
-
-        try:
-            speed = float(item.get("speed"))
-        except (TypeError, ValueError):
-            continue
-
-        # 비정상 속도 제외
-        if not (0 < speed <= 200):
-            continue
-
-        speeds.append(speed)
-
-        created_at = parse_its_datetime(item.get("createdDate"))
-        if created_at is not None:
-            created_times.append(created_at)
-
-    if not speeds:
-        raise RuntimeError(
-            f"ITS 응답에서 {ROAD_NAME}의 유효한 속도 데이터를 찾지 못했습니다."
-        )
-
-    captured_at = now_kst()
-
-    source_updated_at = max(created_times) if created_times else None
-
-    source_status = "NORMAL"
-
-    if source_updated_at:
-        age_minutes = (
-            captured_at - source_updated_at.astimezone(KST)
-        ).total_seconds() / 60
-
-        if age_minutes >= SOURCE_DELAY_MINUTES:
-            source_status = "DELAYED"
-
-    average_speed = round(sum(speeds) / len(speeds), 1)
-
-    print(
-        f"      링크 {len(speeds)}건 / "
-        f"평균 {average_speed} / "
-        f"최소 {round(min(speeds), 1)} / "
-        f"최대 {round(max(speeds), 1)} / "
-        f"상태 {source_status}"
-    )
-
-    return {
-        "localDate": captured_at.date().isoformat(),
-        "capturedAt": captured_at.isoformat(),
-        "road": ROAD_NAME,
-        "averageSpeed": average_speed,
-        "linkCount": len(speeds),
-        "minSpeed": round(min(speeds), 1),
-        "maxSpeed": round(max(speeds), 1),
-        "sourceUpdatedAt": (
-            source_updated_at.isoformat() if source_updated_at else None
-        ),
-        "sourceStatus": source_status,
-    }
-
-
-# =========================================================
-# 3. Vercel 전송
-# =========================================================
-
-def send(data: dict) -> dict:
-    url = env("INGEST_URL")
-    secret = env("CRON_SECRET")
-
-    print(f"[3/3] 전송 중 -> {url}")
-
+def post_json(url: str, data: dict) -> dict:
     request = urllib.request.Request(
         url,
-        data=json.dumps(data).encode("utf-8"),
+        data=json.dumps(data, ensure_ascii=False).encode("utf-8"),
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {secret}",
+            "Authorization": f"Bearer {ingest_secret()}",
         },
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-            return json.loads(response.read().decode("utf-8"))
-
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            raw = response.read()
+            return json.loads(raw.decode("utf-8")) if raw else {"ok": True}
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"전송 실패 HTTP {exc.code}: {body}") from None
+        body = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise RuntimeError(f"서버 전송 실패 HTTP {exc.code}: {body}") from None
 
 
-# =========================================================
-# 진입점
-# =========================================================
+def send_summary(data: dict) -> dict:
+    url = require_env("INGEST_URL")
+    print(f"[3/3] 요약 전송 중 -> {url}")
+    return post_json(url, data)
+
+
+def report_failure(message: str) -> None:
+    """Best-effort failure reporting so the dashboard can distinguish failure/missing."""
+    attempted_at = now_kst()
+    payload = {
+        "localDate": attempted_at.date().isoformat(),
+        "attemptedAt": attempted_at.isoformat(),
+        "status": "FAILED",
+        "message": message[:500],
+    }
+
+    try:
+        post_json(attempt_url(), payload)
+    except Exception as report_exc:
+        print(f"[경고] 실패 이력 전송도 실패했습니다: {report_exc}", file=sys.stderr)
+
 
 def main() -> int:
     started = now_kst()
@@ -265,11 +137,23 @@ def main() -> int:
 
     try:
         payload = fetch_its()
-        data = summarize(payload)
-        result = send(data)
+        print(f"[2/3] {ROAD_NAME} 통계 계산 중...")
+        data = summarize_traffic(payload, captured_at=started)
+
+        print(
+            f"      링크 {data['linkCount']}건 / "
+            f"평균 {data['averageSpeed']} / "
+            f"최소 {data['minSpeed']} / 최대 {data['maxSpeed']} / "
+            f"지연 링크 {data['staleLinkCount']}/{data['sourceTimestampCount']} / "
+            f"상태 {data['sourceStatus']}"
+        )
+
+        result = send_summary(data)
 
     except Exception as exc:
-        print(f"\n[실패] {exc}", file=sys.stderr)
+        message = str(exc)
+        print(f"\n[실패] {message}", file=sys.stderr)
+        report_failure(message)
         return 1
 
     print("\n[성공] 서버 응답:")

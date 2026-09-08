@@ -5,11 +5,5 @@
       "source": "/api/:path*",
       "destination": "/api/index"
     }
-  ],
-  "crons": [
-    {
-      "path": "/api/collect",
-      "schedule": "0 0 * * *"
-    }
   ]
 }
