@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from traffic_core import summarize_traffic
+from traffic_core import TrafficDataError, summarize_traffic
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -12,9 +12,9 @@ class SummarizeTrafficTests(unittest.TestCase):
         payload = {
             "body": {
                 "items": [
-                    {"roadName": "달구벌대로", "speed": "30", "createdDate": "20260907085500"},
-                    {"roadName": "달구벌대로", "speed": "0", "createdDate": "20260907085500"},
-                    {"roadName": "다른도로", "speed": "50", "createdDate": "20260907085500"},
+                    {"roadName": "달구벌대로", "linkId": "A", "speed": "30", "createdDate": "20260907085500"},
+                    {"roadName": "달구벌대로", "linkId": "B", "speed": "0", "createdDate": "20260907085500"},
+                    {"roadName": "다른도로", "linkId": "C", "speed": "50", "createdDate": "20260907085500"},
                 ]
             }
         }
@@ -25,6 +25,7 @@ class SummarizeTrafficTests(unittest.TestCase):
         self.assertEqual(result["linkCount"], 1)
         self.assertEqual(result["averageSpeed"], 30.0)
         self.assertEqual(result["sourceStatus"], "NORMAL")
+        self.assertEqual(result["samples"][0]["linkId"], "A")
 
     def test_stale_ratio_marks_delayed(self):
         payload = {
@@ -57,6 +58,40 @@ class SummarizeTrafficTests(unittest.TestCase):
         self.assertEqual(result["sourceStatus"], "DELAYED")
         self.assertEqual(result["staleLinkCount"], 9)
         self.assertEqual(result["sourceTimestampCount"], 10)
+
+    def test_keeps_at_most_five_evenly_spaced_real_samples(self):
+        items = [
+            {
+                "roadName": "달구벌대로",
+                "linkId": f"L{i}",
+                "speed": 20 + i,
+                "createdDate": "20260907085500",
+            }
+            for i in range(10)
+        ]
+        result = summarize_traffic(
+            {"items": items},
+            captured_at=datetime(2026, 9, 7, 9, 0, tzinfo=KST),
+        )
+        self.assertEqual(len(result["samples"]), 5)
+        self.assertEqual(result["samples"][0]["linkId"], "L0")
+        self.assertEqual(result["samples"][-1]["linkId"], "L9")
+
+    def test_empty_data_has_stable_failure_type(self):
+        with self.assertRaises(TrafficDataError) as ctx:
+            summarize_traffic(
+                {"items": []},
+                captured_at=datetime(2026, 9, 7, 9, 0, tzinfo=KST),
+            )
+        self.assertEqual(ctx.exception.failure_type, "EMPTY_DATA")
+
+    def test_api_error_has_http_failure_type(self):
+        with self.assertRaises(TrafficDataError) as ctx:
+            summarize_traffic(
+                {"header": {"resultCode": "99", "resultMsg": "error"}},
+                captured_at=datetime(2026, 9, 7, 9, 0, tzinfo=KST),
+            )
+        self.assertEqual(ctx.exception.failure_type, "HTTP_ERROR")
 
 
 if __name__ == "__main__":

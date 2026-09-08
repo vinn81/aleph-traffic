@@ -43,13 +43,12 @@ aleph-traffic/
 ├── collect_local.py
 ├── traffic_core.py
 ├── index.html
+├── verify.html
 ├── pyproject.toml
 ├── vercel.json
 ├── schema.sql
 ├── .env.example
 ├── .gitignore
-├── DEPLOY_CHECKLIST.md
-├── FILE_STRUCTURE.txt
 └── README.md
 ```
 
@@ -77,6 +76,7 @@ INGEST_SECRET
 ```sql
 SELECT * FROM traffic_daily ORDER BY local_date DESC;
 SELECT * FROM collection_attempts ORDER BY attempted_at DESC;
+SELECT * FROM traffic_source_samples ORDER BY local_date DESC, id ASC;
 ```
 
 ## 3. Vercel 배포
@@ -236,6 +236,7 @@ Windows라면 작업 스케줄러에서 다음 형태로 등록할 수 있습니
 GET  /api/health      설정 상태
 GET  /api/dashboard   메인 화면 데이터
 GET  /api/history     최근 30개 기록 + 전체 기록일 수
+GET  /api/verify      제출 조건 검증용 읽기 전용 증거 API
 POST /api/ingest      로컬 수집 성공값 수신 (인증 필요)
 POST /api/attempt     로컬 수집 실패 이력 수신 (인증 필요)
 ```
@@ -273,3 +274,28 @@ python -m unittest discover -s tests -v
 - 실제 API Key / DB URL / 비밀값을 GitHub에 커밋하지 마세요.
 - `.env`, `collector.env` 등은 `.gitignore`에 포함되어 있습니다.
 - 서버 내부 예외 상세는 공개 API 응답으로 그대로 반환하지 않고 Vercel 로그에만 남깁니다.
+
+
+## 16. 제출 검증 화면
+
+배포 후 다음 주소에서 제출 조건을 한 번에 확인할 수 있습니다.
+
+```text
+https://YOUR_PROJECT.vercel.app/verify
+```
+
+검증 화면은 다음 다섯 항목을 표시합니다.
+
+1. **실제 공개 원천의 값과 맥락**: 국가교통정보센터 ITS, 달구벌대로, 최신 실제 집계값, 실제 링크 샘플 최대 5건
+2. **외부 실패 5종 합성 재생**: `TIMEOUT`, `HTTP_ERROR`, `INVALID_JSON`, `EMPTY_DATA`, `STALE_DATA`
+3. **마지막 정상값과 일별 기록 보존**: 실패를 0 km/h로 저장하지 않고 기존 NORMAL을 유지
+4. **KST 전날 대비**: 오늘과 달력상 전날 실제 기록 2건이 모두 있을 때만 변화값 계산
+5. **비밀값 비노출**: `ITS_API_KEY`, `INGEST_SECRET`, `CRON_SECRET`, `DATABASE_URL`, Authorization 헤더를 검증 응답에 포함하지 않음
+
+합성 실패 재생은 **메모리에서만 실행되며 DB를 변경하지 않습니다.**
+
+### 원천 샘플
+
+`collect_local.py`가 실제 ITS 응답에서 달구벌대로 유효 링크를 추린 뒤, 순서상 균등 간격으로 최대 5건을 `traffic_source_samples`에 저장합니다. API 키는 저장하지 않습니다.
+
+기존 DB를 사용 중이라면 업데이트된 `schema.sql`을 Neon SQL Editor에서 다시 한 번 실행해야 `failure_type` 컬럼과 `traffic_source_samples` 테이블이 추가됩니다. 기존 `traffic_daily` 데이터는 삭제되지 않습니다.

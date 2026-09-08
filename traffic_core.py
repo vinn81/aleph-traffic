@@ -1,4 +1,4 @@
-"""Shared traffic parsing and summarization logic for the local collector."""
+"""Shared ITS parsing, validation, sampling, and summarization logic."""
 
 from __future__ import annotations
 
@@ -18,6 +18,15 @@ BBOX = {
 SOURCE_DELAY_MINUTES = 30
 SOURCE_STALE_RATIO_THRESHOLD = 0.30
 MAX_VALID_SPEED_KMH = 200.0
+SOURCE_SAMPLE_LIMIT = 5
+
+
+class TrafficDataError(RuntimeError):
+    """Expected external-source/data failure with a stable public failure type."""
+
+    def __init__(self, failure_type: str, message: str):
+        super().__init__(message)
+        self.failure_type = failure_type
 
 
 def now_kst() -> datetime:
@@ -80,9 +89,38 @@ def detect_api_error(payload: object) -> None:
     result_msg = str(header.get("resultMsg", "")).strip()
 
     if result_code and result_code not in {"0", "00"}:
-        raise RuntimeError(
-            f"ITS API 오류 {result_code}: {result_msg or '알 수 없는 오류'}"
+        raise TrafficDataError(
+            "HTTP_ERROR",
+            f"ITS API 오류 {result_code}: {result_msg or '알 수 없는 오류'}",
         )
+
+
+def _link_id(item: dict) -> str | None:
+    value = item.get("linkId")
+    if value is None:
+        value = item.get("linkID")
+    if value is None:
+        value = item.get("link_id")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _even_sample(records: list[dict], limit: int = SOURCE_SAMPLE_LIMIT) -> list[dict]:
+    """Pick at most ``limit`` deterministic, evenly spaced source records."""
+    if not records:
+        return []
+    if len(records) <= limit:
+        return records.copy()
+    if limit <= 1:
+        return [records[0]]
+
+    last = len(records) - 1
+    indices = [round(i * last / (limit - 1)) for i in range(limit)]
+    # round() can theoretically produce duplicates for tiny inputs; keep order unique.
+    unique_indices = list(dict.fromkeys(indices))
+    return [records[index] for index in unique_indices]
 
 
 def summarize_traffic(
@@ -92,16 +130,16 @@ def summarize_traffic(
 ) -> dict:
     """Extract Dalgubeol-daero links and return one daily summary payload.
 
-    Source freshness is not decided from a single newest link. Instead, a source is
-    considered DELAYED when at least 30% of links with a timestamp are 30 minutes
-    or more behind the capture time.
+    Freshness is decided from all links that expose a source timestamp. A source is
+    DELAYED when at least 30% of those links are 30 minutes or more behind capture.
+    Up to five evenly spaced real source-link samples are retained for verification.
     """
     detect_api_error(payload)
     items = find_traffic_items(payload)
     if not items:
-        raise RuntimeError("ITS 응답에 교통 데이터가 없습니다.")
+        raise TrafficDataError("EMPTY_DATA", "ITS 응답에 교통 데이터가 없습니다.")
 
-    speeds: list[float] = []
+    valid_records: list[dict] = []
     created_times: list[datetime] = []
 
     for item in items:
@@ -117,15 +155,23 @@ def summarize_traffic(
         if not (0 < speed <= MAX_VALID_SPEED_KMH):
             continue
 
-        speeds.append(speed)
-
         created_at = parse_its_datetime(item.get("createdDate"))
         if created_at is not None:
             created_times.append(created_at)
 
-    if not speeds:
-        raise RuntimeError(
-            f"ITS 응답에서 {ROAD_NAME}의 유효한 속도 데이터를 찾지 못했습니다."
+        valid_records.append(
+            {
+                "roadName": road_name,
+                "linkId": _link_id(item),
+                "speed": speed,
+                "createdAt": created_at,
+            }
+        )
+
+    if not valid_records:
+        raise TrafficDataError(
+            "EMPTY_DATA",
+            f"ITS 응답에서 {ROAD_NAME}의 유효한 속도 데이터를 찾지 못했습니다.",
         )
 
     captured_at = captured_at or now_kst()
@@ -145,16 +191,25 @@ def summarize_traffic(
             stale_count += 1
 
     timestamp_count = len(created_times)
-    stale_ratio = (
-        stale_count / timestamp_count
-        if timestamp_count
-        else 0.0
-    )
+    stale_ratio = stale_count / timestamp_count if timestamp_count else 0.0
     source_status = (
         "DELAYED"
         if timestamp_count and stale_ratio >= SOURCE_STALE_RATIO_THRESHOLD
         else "NORMAL"
     )
+
+    speeds = [record["speed"] for record in valid_records]
+    samples = []
+    for record in _even_sample(valid_records):
+        created_at = record["createdAt"]
+        samples.append(
+            {
+                "roadName": record["roadName"],
+                "linkId": record["linkId"],
+                "speed": round(record["speed"], 1),
+                "sourceUpdatedAt": created_at.isoformat() if created_at else None,
+            }
+        )
 
     return {
         "localDate": captured_at.date().isoformat(),
@@ -171,4 +226,5 @@ def summarize_traffic(
         "sourceTimestampCount": timestamp_count,
         "staleLinkCount": stale_count,
         "staleRatio": round(stale_ratio, 4),
+        "samples": samples,
     }

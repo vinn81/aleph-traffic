@@ -1,31 +1,37 @@
 """달구벌대로 교통정보 로컬 수집기.
 
-매일 09:00 KST에 국내 일반 회선에서 실행하는 것을 전제로 한다.
-ITS 원본 데이터는 로컬에서 조회하고, 요약 결과만 Vercel API로 전송한다.
-
-필수 환경변수:
-    ITS_API_KEY    ITS 오픈API 인증키
-    INGEST_URL     예: https://your-app.vercel.app/api/ingest
-    INGEST_SECRET  서버와 공유하는 비밀값 (기존 CRON_SECRET도 호환)
-
-선택 환경변수:
-    ATTEMPT_URL    실패 이력을 보낼 주소. 미설정 시 INGEST_URL에서 자동 추론
+매일 09:00 KST에 국내 일반 회선에서 실행한다.
+ITS 원본 데이터는 로컬에서 조회하고, 요약 결과와 검증용 원천 샘플만
+Vercel API로 전송한다.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode
 
-from traffic_core import BBOX, ROAD_NAME, now_kst, summarize_traffic
+from traffic_core import (
+    BBOX,
+    ROAD_NAME,
+    TrafficDataError,
+    now_kst,
+    summarize_traffic,
+)
 
 ITS_URL = "https://openapi.its.go.kr:9443/trafficInfo"
 HTTP_TIMEOUT_SECONDS = 60
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
+
+
+class CollectorFailure(RuntimeError):
+    def __init__(self, failure_type: str | None, message: str):
+        super().__init__(message)
+        self.failure_type = failure_type
 
 
 def require_env(name: str) -> str:
@@ -75,18 +81,39 @@ def fetch_its() -> dict:
     print("[1/3] ITS 호출 중...")
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
 
-    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-        raw = response.read(MAX_RESPONSE_BYTES + 1)
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        raise CollectorFailure(
+            "HTTP_ERROR",
+            f"ITS API HTTP 오류가 발생했습니다. 상태코드: {exc.code}",
+        ) from None
+    except (TimeoutError, socket.timeout):
+        raise CollectorFailure("TIMEOUT", "ITS API 응답 시간이 초과되었습니다.") from None
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise CollectorFailure("TIMEOUT", "ITS API 응답 시간이 초과되었습니다.") from None
+        raise CollectorFailure(
+            "HTTP_ERROR",
+            "ITS API에 연결하지 못했습니다.",
+        ) from None
 
     if len(raw) > MAX_RESPONSE_BYTES:
-        raise RuntimeError("ITS 응답 크기가 허용 범위를 초과했습니다.")
+        raise CollectorFailure(
+            "HTTP_ERROR",
+            "ITS 응답 크기가 허용 범위를 초과했습니다.",
+        )
 
     print(f"      수신 {len(raw):,} bytes")
 
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("ITS JSON 응답을 해석할 수 없습니다.") from exc
+        raise CollectorFailure(
+            "INVALID_JSON",
+            "ITS JSON 응답을 해석할 수 없습니다.",
+        ) from exc
 
 
 def post_json(url: str, data: dict) -> dict:
@@ -115,13 +142,14 @@ def send_summary(data: dict) -> dict:
     return post_json(url, data)
 
 
-def report_failure(message: str) -> None:
-    """Best-effort failure reporting so the dashboard can distinguish failure/missing."""
+def report_failure(message: str, failure_type: str | None = None) -> None:
+    """Best-effort failure reporting without API keys or secret values."""
     attempted_at = now_kst()
     payload = {
         "localDate": attempted_at.date().isoformat(),
         "attemptedAt": attempted_at.isoformat(),
         "status": "FAILED",
+        "failureType": failure_type,
         "message": message[:500],
     }
 
@@ -145,15 +173,25 @@ def main() -> int:
             f"평균 {data['averageSpeed']} / "
             f"최소 {data['minSpeed']} / 최대 {data['maxSpeed']} / "
             f"지연 링크 {data['staleLinkCount']}/{data['sourceTimestampCount']} / "
-            f"상태 {data['sourceStatus']}"
+            f"상태 {data['sourceStatus']} / "
+            f"원천 샘플 {len(data['samples'])}건"
         )
 
         result = send_summary(data)
 
+    except CollectorFailure as exc:
+        print(f"\n[실패:{exc.failure_type}] {exc}", file=sys.stderr)
+        report_failure(str(exc), exc.failure_type)
+        return 1
+    except TrafficDataError as exc:
+        print(f"\n[실패:{exc.failure_type}] {exc}", file=sys.stderr)
+        report_failure(str(exc), exc.failure_type)
+        return 1
     except Exception as exc:
+        # 서버 인증/저장 오류나 로컬 설정 오류 등은 외부 ITS 5종과 구분한다.
         message = str(exc)
         print(f"\n[실패] {message}", file=sys.stderr)
-        report_failure(message)
+        report_failure(message, None)
         return 1
 
     print("\n[성공] 서버 응답:")
