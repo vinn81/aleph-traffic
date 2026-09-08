@@ -1,60 +1,404 @@
 # 달구벌 NOW
 
-대구광역시 **달구벌대로**의 ITS 교통 데이터를 국내 회선에서 **매일 오전 09:00 KST에 한 번 수집**하고, 날짜별 1건으로 Neon Postgres에 저장해 **오늘과 전날**의 평균 통행속도를 비교하는 대시보드입니다.
+대구광역시 **달구벌대로**의 교통 흐름을 매일 같은 시각에 기록하고,  
+**오늘과 전날의 평균 통행속도를 비교**하는 일별 교통 모니터링 프로젝트입니다.
 
-## 최종 구조
+실시간 ITS 원천 데이터는 국내 로컬 환경에서 수집하고, 가공된 결과만 Vercel API를 통해 Neon Postgres에 저장합니다.
+
+> **운영 기준**
+>
+> - 공식 수집 시각: **매일 09:00 KST**
+> - 공식 수집 허용 구간: **09:00 ~ 09:09 KST**
+> - 비교 기준: **KST 달력상 전날**
+> - 10:00까지 수집 결과가 없으면: **MISSED**
+> - 늦게 실행한 현재 데이터를 09:00 데이터로 소급 저장하지 않음
+
+---
+
+## 서비스
+
+- 메인 대시보드: `https://aleph-traffic.vercel.app`
+- 검증 페이지: `https://aleph-traffic.vercel.app/verify`
+- API 상태 확인: `https://aleph-traffic.vercel.app/api/health`
+
+---
+
+## 프로젝트 목적
+
+이 프로젝트는 단순히 현재 교통속도를 보여주는 것이 아니라,  
+**동일한 기준 시각의 실제 교통 데이터를 하루 단위로 누적**하는 것을 목표로 합니다.
+
+이를 통해 다음을 확인할 수 있습니다.
+
+- 오늘 달구벌대로의 평균 통행속도
+- 전날 대비 속도 변화
+- 최소 / 최대 속도
+- 분석에 사용된 링크 수
+- 원천 데이터의 최신성
+- 최근 일별 교통 기록
+- 수집 성공 / 실패 / 누락 상태
+- 마지막 정상 데이터 보존 여부
+
+---
+
+## 전체 구조
 
 ```text
-매일 09:00 KST
-      ↓
-로컬 PC / NAS / 국내 서버 스케줄러
-      ↓
-collect_local.py
-      ↓
-ITS 교통소통정보 API
-      ↓
-달구벌대로 링크 추출 + 통계/지연 판정
-      ↓
-POST /api/ingest
-      ↓
-Vercel FastAPI
-      ↓
-Neon Postgres
-
-사용자 접속
-      ↓
-/api/dashboard
-      ↓
-Neon DB 조회
-      ↓
-오늘 / 전날 비교
+                  매일 09:00 KST
+                        │
+                        ▼
+              Windows 작업 스케줄러
+                        │
+                        ▼
+                 collect_local.py
+                        │
+                        ▼
+            국가교통정보센터 ITS API
+                        │
+                        ▼
+                  traffic_core.py
+            ┌───────────┴───────────┐
+            │                       │
+       링크 필터링              데이터 검증
+       속도 집계                지연 여부 판정
+       원천 샘플                실패 유형 분류
+            │                       │
+            └───────────┬───────────┘
+                        ▼
+                POST /api/ingest
+                        │
+                        ▼
+                Vercel FastAPI
+                        │
+                        ▼
+                  Neon Postgres
+          ┌─────────────┼─────────────┐
+          ▼             ▼             ▼
+   traffic_daily   collection_   traffic_source_
+                    attempts       samples
+          │
+          ▼
+     /api/dashboard
+          │
+          ▼
+      index.html
 ```
 
-Vercel은 ITS를 직접 호출하지 않습니다. 다만 매일 **10:00 KST에 DB만 확인하는 Vercel Cron**이 `/api/check-missed`를 호출해, 09:00 로컬 수집 데이터와 실패 보고가 모두 없으면 `MISSED`를 기록합니다.
+Vercel은 ITS 원천 데이터를 직접 수집하지 않습니다.
 
-## 파일 구조
+교통정보 수집은 **국내 로컬 환경**에서만 수행하며,  
+Vercel은 데이터 저장·조회와 누락 여부 확인을 담당합니다.
+
+---
+
+## 일별 수집 방식
+
+### 1. 09:00 로컬 수집
+
+매일 09:00 KST에 Windows 작업 스케줄러가 `collect_local.py`를 실행합니다.
+
+수집기는 다음 순서로 동작합니다.
 
 ```text
-aleph-traffic/
-├── api/
-│   └── index.py
-├── tests/
-│   └── test_traffic_core.py
-├── collect_local.py
-├── traffic_core.py
-├── index.html
-├── verify.html
-├── pyproject.toml
-├── vercel.json
-├── schema.sql
-├── .env.example
-├── .gitignore
-└── README.md
+ITS API 호출
+    ↓
+달구벌대로 링크 추출
+    ↓
+유효 속도값 검증
+    ↓
+평균 / 최소 / 최대 속도 계산
+    ↓
+원천 데이터 지연 여부 판정
+    ↓
+검증용 링크 샘플 추출
+    ↓
+Vercel /api/ingest 전송
+    ↓
+Neon DB 저장
 ```
 
-## 1. Vercel 환경변수
+공식 일별 데이터는 **09:00~09:09 KST에 시작된 수집만 저장**됩니다.
 
-Vercel Production 환경에는 다음 값이 필요합니다.
+예를 들어 12:00에 수동 실행하더라도 그 값을 09:00 데이터처럼 저장하지 않습니다.
+
+---
+
+## PC가 꺼져 있으면?
+
+09:00에 로컬 PC가 꺼져 있으면 수집기 자체가 실행되지 않습니다.
+
+이 경우 Vercel이 매일 **10:00 KST**에 DB만 확인합니다.
+
+```text
+09:00
+PC 꺼짐
+    ↓
+로컬 수집 실행 안 됨
+    ↓
+서버에 데이터 / 실패 보고 없음
+
+10:00
+Vercel /api/check-missed 실행
+    ↓
+오늘 공식 기록 없음
++ FAILED 기록 없음
+    ↓
+MISSED 기록
+```
+
+Vercel의 10:00 작업은 **ITS API를 호출하지 않습니다.**
+
+---
+
+## 수집 상태
+
+| 상태 | 의미 |
+|---|---|
+| `NORMAL` | 정상 수집 및 정상 원천 데이터 |
+| `DELAYED` | 수집은 성공했지만 원천 데이터 지연 비율이 기준 이상 |
+| `FAILED` | 수집기가 실행됐지만 ITS/API/데이터 처리 과정에서 실패 |
+| `MISSED` | 10:00까지 공식 데이터와 실패 보고가 모두 도착하지 않음 |
+| `MISSING` | 09:00 이후, 10:00 누락 점검 전까지 아직 결과가 없는 상태 |
+
+실패가 발생해도 교통속도를 `0 km/h`로 저장하지 않습니다.
+
+`0 km/h`는 실제 교통상황과 장애를 구분할 수 없기 때문입니다.
+
+---
+
+## 전날 대비
+
+비교 대상은 **가장 최근의 과거 데이터가 아니라 정확히 전날 데이터**입니다.
+
+예:
+
+```text
+2026-09-07  27.4 km/h
+2026-09-08  26.6 km/h
+```
+
+결과:
+
+```text
+전날 대비 -0.8 km/h
+```
+
+반대로:
+
+```text
+09/08 데이터 있음
+09/07 데이터 없음
+09/06 데이터 있음
+```
+
+이라면 `09/06`을 대신 사용하지 않습니다.
+
+이 경우 전날 비교는 **사용 불가**로 표시합니다.
+
+---
+
+## 교통속도 계산
+
+ITS 응답 중 다음 조건을 만족하는 링크만 사용합니다.
+
+- `roadName`에 `달구벌대로` 포함
+- 속도 `0 < speed <= 200 km/h`
+
+대표 통행속도는 유효 링크들의 **산술평균**입니다.
+
+```text
+평균 통행속도
+= 유효 링크 speed 합계 / 유효 링크 수
+```
+
+함께 기록하는 값:
+
+- 평균속도
+- 최소속도
+- 최대속도
+- 유효 링크 수
+- 원천 최신 시각
+- 지연 링크 수
+- 원천 데이터 지연 비율
+- 최대 5개의 실제 원천 링크 샘플
+
+---
+
+## 원천 데이터 지연 판정
+
+링크 하나의 최신 시각만 보는 대신, 생성시각이 존재하는 전체 링크를 검사합니다.
+
+기준:
+
+```text
+지연 기준       : 30분
+DELAYED 판정    : timestamp가 있는 링크 중
+                  30% 이상이 30분 이상 오래된 경우
+```
+
+따라서 최신 링크 하나만 정상이고 나머지 데이터가 오래된 상황을 정상으로 오판하는 문제를 줄였습니다.
+
+---
+
+## 데이터 보존 정책
+
+### 공식 일별 기록
+
+`traffic_daily`는 날짜별 공식 교통 기록을 저장합니다.
+
+한 날짜에 하나의 공식 기록만 존재합니다.
+
+기존 정상 데이터가 있는 상태에서 지연된 데이터를 다시 수집하더라도  
+**기존 NORMAL 데이터를 DELAYED 데이터가 덮어쓰지 않습니다.**
+
+### 수집 이력
+
+`collection_attempts`에는 수집 시도를 별도로 기록합니다.
+
+따라서:
+
+```text
+공식 일별 데이터
+≠
+수집 시도 이력
+```
+
+으로 분리됩니다.
+
+외부 장애가 발생해도 마지막 정상값과 기존 일별 기록은 그대로 유지됩니다.
+
+---
+
+## 데이터베이스
+
+Neon Postgres에서 다음 3개 테이블을 사용합니다.
+
+### `traffic_daily`
+
+날짜별 공식 교통 기록입니다.
+
+주요 데이터:
+
+```text
+local_date
+captured_at
+road_name
+average_speed
+min_speed
+max_speed
+link_count
+source_updated_at
+source_status
+```
+
+### `collection_attempts`
+
+실제 수집 시도 및 누락 상태를 기록합니다.
+
+주요 데이터:
+
+```text
+attempted_at
+local_date
+status
+failure_type
+message
+average_speed
+link_count
+source_updated_at
+```
+
+### `traffic_source_samples`
+
+실제 공개 원천의 값과 맥락을 검증하기 위해  
+매일 최대 5개의 ITS 링크 샘플을 보관합니다.
+
+주요 데이터:
+
+```text
+local_date
+captured_at
+road_name
+link_id
+speed
+source_updated_at
+```
+
+API Key, DB URL, 인증 Secret 등의 비밀정보는 저장하지 않습니다.
+
+---
+
+## 외부 실패 처리
+
+수집 과정에서 다음 유형을 구분합니다.
+
+```text
+TIMEOUT
+HTTP_ERROR
+INVALID_JSON
+EMPTY_DATA
+STALE_DATA
+```
+
+`/verify` 페이지에서는 위 5개 상황을 **메모리에서 합성 재생**합니다.
+
+합성 테스트는 실제 운영 DB를 수정하지 않습니다.
+
+---
+
+## 검증 페이지
+
+`/verify`는 프로젝트 제출 조건을 한 화면에서 확인하기 위한 페이지입니다.
+
+검증 항목:
+
+1. **실제 공개 원천의 값과 맥락**
+   - 원천 제공자
+   - 대상 도로
+   - 수집 시각
+   - 링크 수
+   - 평균 / 최소 / 최대 속도
+   - 실제 원천 링크 샘플
+
+2. **외부 실패 5종 합성 재생**
+   - TIMEOUT
+   - HTTP_ERROR
+   - INVALID_JSON
+   - EMPTY_DATA
+   - STALE_DATA
+
+3. **마지막 정상값과 일별 기록 보존**
+
+4. **서로 다른 KST 날짜의 실제 오늘·전날 기록과 변화값**
+
+5. **개인정보·비밀값 비노출**
+
+검증 API:
+
+```text
+GET /api/verify
+```
+
+---
+
+## API
+
+| Method | Endpoint | 설명 |
+|---|---|---|
+| `GET` | `/api` | API 정보 |
+| `GET` | `/api/health` | 환경 및 서비스 상태 확인 |
+| `GET` | `/api/dashboard` | 메인 대시보드 데이터 |
+| `GET` | `/api/history` | 최근 일별 기록 |
+| `GET` | `/api/verify` | 제출 검증 데이터 |
+| `GET` | `/api/check-missed` | 10:00 누락 검사, Vercel Cron 전용 |
+| `POST` | `/api/ingest` | 로컬 정상 수집 데이터 저장 |
+| `POST` | `/api/attempt` | 로컬 실패 이력 저장 |
+
+---
+
+## 환경변수
+
+### Vercel Production
 
 ```text
 DATABASE_URL
@@ -62,253 +406,126 @@ INGEST_SECRET
 CRON_SECRET
 ```
 
-기존에 `CRON_SECRET`을 사용하고 있다면 그대로 두어도 호환됩니다. 새 설정에서는 의미가 더 명확한 `INGEST_SECRET`을 권장합니다.
-
-**Vercel에는 `ITS_API_KEY`가 필요하지 않습니다.** ITS 호출은 로컬 수집기만 수행합니다. `CRON_SECRET`은 ITS 수집용이 아니라 10:00 누락 점검 Cron 인증에만 사용합니다.
-
-## 2. Neon DB 초기화
-
-배포 전에 Neon SQL Editor에서 `schema.sql`을 한 번 실행합니다.
-
-이 프로젝트는 요청마다 `CREATE TABLE`을 실행하지 않습니다. 스키마 변경은 `schema.sql`로 명시적으로 관리합니다.
-
-확인:
-
-```sql
-SELECT * FROM traffic_daily ORDER BY local_date DESC;
-SELECT * FROM collection_attempts ORDER BY attempted_at DESC;
-SELECT * FROM traffic_source_samples ORDER BY local_date DESC, id ASC;
-```
-
-## 3. Vercel 배포
-
-GitHub 저장소를 Vercel에 연결해 배포합니다.
-
-배포 후 확인:
+역할:
 
 ```text
-https://YOUR_PROJECT.vercel.app/api/health
+DATABASE_URL
+→ Neon Postgres 연결
+
+INGEST_SECRET
+→ 로컬 수집기 → Vercel 데이터 전송 인증
+
+CRON_SECRET
+→ Vercel 10:00 MISSED 점검 인증
 ```
 
-정상 예시:
+`INGEST_SECRET`과 `CRON_SECRET`은 서로 다른 역할입니다.
 
-```json
-{
-  "ok": true,
-  "databaseConfigured": true,
-  "ingestSecretConfigured": true,
-  "missedCheckConfigured": true,
-  "collectionMode": "LOCAL_INGEST",
-  "expectedCollectTimeKST": "09:00",
-  "officialCaptureWindowKST": "09:00-09:09",
-  "missedCheckTimeKST": "10:00",
-  "runtime": "Vercel Python / FastAPI"
-}
-```
+---
 
-## 4. 로컬 수집기 환경변수
-
-수집기를 실행하는 국내 PC/NAS/서버에는 다음 값이 필요합니다.
+### 로컬 수집 PC
 
 ```text
 ITS_API_KEY
-INGEST_URL=https://YOUR_PROJECT.vercel.app/api/ingest
-INGEST_SECRET=Vercel과_동일한_값
+INGEST_URL=https://aleph-traffic.vercel.app/api/ingest
+INGEST_SECRET=Vercel의 INGEST_SECRET과 동일한 값
 ```
 
-기존 `CRON_SECRET`도 `INGEST_SECRET` 대신 사용할 수 있습니다.
+로컬 PC에는 `CRON_SECRET`이 필요하지 않습니다.
 
-선택값:
+실제 비밀값이 들어 있는 `.cmd`, `.bat`, 환경변수 파일은 GitHub에 업로드하지 않습니다.
+
+---
+
+## Windows 자동 실행
+
+현재 운영 환경에서는 Windows 작업 스케줄러를 사용합니다.
 
 ```text
-ATTEMPT_URL=https://YOUR_PROJECT.vercel.app/api/attempt
+작업 이름 : ALEPH Traffic 0900 Collector
+실행 주기 : 매일
+실행 시각 : 09:00 KST
 ```
 
-`ATTEMPT_URL`을 생략하면 `INGEST_URL`을 기준으로 자동 계산합니다.
+작업 스케줄러가 로컬 수집 스크립트를 실행하고, 수집 결과를 Vercel로 전송합니다.
 
-> `.env.example`은 값의 예시일 뿐이며 `collect_local.py`가 `.env` 파일을 자동 로드하지는 않습니다. 운영체제 환경변수 또는 스케줄러 실행 스크립트에서 값을 주입하세요.
+---
 
-## 5. 로컬 수집 테스트
+## 저장소 구조
 
-환경변수를 설정한 터미널에서:
-
-```bash
-python collect_local.py
-```
-
-정상 흐름:
+GitHub에는 서비스 동작과 이해에 필요한 파일만 유지합니다.
 
 ```text
-[1/3] ITS 호출
-[2/3] 달구벌대로 통계 계산
-[3/3] /api/ingest 전송
+aleph-traffic/
+├── api/
+│   └── index.py          # FastAPI 백엔드
+│
+├── collect_local.py      # 국내 로컬 ITS 수집기
+├── traffic_core.py       # 파싱 / 집계 / 지연 판정 공통 로직
+│
+├── index.html            # 메인 대시보드
+├── verify.html           # 제출 검증 페이지
+│
+├── pyproject.toml        # Python 의존성
+├── vercel.json           # Vercel 라우팅 / Cron 설정
+└── README.md
 ```
 
-성공하면 같은 날짜의 `traffic_daily` 행이 저장됩니다.
+로컬 자동 실행용 파일은 비밀값 노출 방지를 위해 저장소에 포함하지 않습니다.
 
-## 6. 매일 09:00 자동 실행
+---
 
-과제 조건에 맞춰 로컬 환경의 스케줄러를 **매일 오전 09:00 KST**로 설정합니다. 공식 일별 기록은 09:00~09:09 KST에 시작된 수집만 허용합니다. 그 이후 실행한 현재값을 09:00 값으로 저장하지 않습니다.
+## 기술 스택
 
-Windows라면 작업 스케줄러에서 다음 형태로 등록할 수 있습니다.
+### Frontend
+- HTML
+- CSS
+- Vanilla JavaScript
+
+### Backend
+- Python 3.12+
+- FastAPI
+- Pydantic
+
+### Database
+- Neon Serverless Postgres
+- psycopg 3
+
+### Deployment
+- Vercel
+
+### Data Source
+- 국가교통정보센터 ITS 교통소통정보 API
+
+---
+
+## 보안 원칙
+
+다음 값은 웹 화면과 공개 API 응답에 노출하지 않습니다.
 
 ```text
-트리거: 매일 09:00
-프로그램: python.exe
-인수: C:\path\to\aleph-traffic\collect_local.py
-시작 위치: C:\path\to\aleph-traffic
+ITS_API_KEY
+INGEST_SECRET
+CRON_SECRET
+DATABASE_URL
+Authorization Header
 ```
 
-환경변수는 해당 사용자/시스템 환경변수에 등록하거나 별도 실행 스크립트에서 설정합니다.
+`/api/ingest`와 `/api/attempt`는 Bearer Secret 인증을 사용합니다.
 
-## 7. 하루 1건 저장 정책
+상세 서버 예외도 그대로 사용자에게 반환하지 않고 서버 로그와 공개 오류 메시지를 분리합니다.
 
-`traffic_daily.local_date`가 PRIMARY KEY이므로 날짜별 행은 최대 1건입니다.
+---
 
-같은 날 재수집 시:
-
-- 기존 값이 `DELAYED`이고 새 값이 `NORMAL`이면 정상값으로 갱신
-- 기존 값이 `NORMAL`이고 새 값이 `DELAYED`이면 **기존 NORMAL 값을 유지**
-- `NORMAL → NORMAL`, `DELAYED → DELAYED` 재수집은 최신 결과로 갱신
-
-수집 시도 자체는 `collection_attempts`에 별도로 기록됩니다.
-
-## 8. 수집 실패 및 MISSED 기록
-
-로컬에서 ITS 호출이나 요약 처리에 실패하면 수집기가 `/api/attempt`로 `FAILED` 이력을 전송합니다.
-
-매일 10:00 KST에는 Vercel Cron이 `/api/check-missed`를 호출합니다. 이 엔드포인트는 ITS를 호출하지 않고 DB만 확인합니다. 오늘의 공식 일별 기록도 없고 로컬 수집기의 `FAILED` 보고도 없다면 `MISSED`를 기록합니다. 따라서 PC 전원 꺼짐, 작업 스케줄러 미실행, 로컬 측에서 서버까지 아무 보고도 도착하지 않은 경우를 운영상 `MISSED`로 구분합니다.
-
-따라서 대시보드는 오전 09:00 이후 데이터가 없을 때 다음을 구분할 수 있습니다.
+## 핵심 설계 원칙
 
 ```text
-수집기는 실행됐지만 ITS/API 실패 → ERROR / FAILED
-09:00 이후 아직 10:00 누락 점검 전 → MISSING
-10:00까지 데이터·실패 보고 모두 없음 → MISSED
+실패값을 정상 교통값으로 위장하지 않는다.
+늦게 수집한 데이터를 09:00 데이터로 소급하지 않는다.
+전날 데이터가 없으면 다른 날짜로 대체하지 않는다.
+기존 정상 기록을 불완전한 데이터로 덮어쓰지 않는다.
+실제 원천값의 일부를 비밀정보 없이 검증 가능하게 남긴다.
 ```
 
-실패 이력 전송까지 네트워크 문제로 실패한 경우에는 로컬 콘솔 로그를 확인해야 합니다.
-
-## 9. 전날 대비 비교
-
-비교 대상은 **직전 저장 기록이 아니라 달력상 전날**입니다.
-
-예:
-
-```text
-9/6 32.4 km/h
-9/7 28.7 km/h
-```
-
-9/7 화면:
-
-```text
-전날 대비 -3.7 km/h
-```
-
-전날 데이터가 없다면 다른 과거 날짜를 대신 비교하지 않고 **비교할 기록 없음**으로 표시합니다.
-
-## 10. 원천 데이터 지연 판정
-
-달구벌대로 링크 하나의 최신 시각만 보는 대신, 생성시각이 있는 링크 전체를 검사합니다.
-
-- 기준 지연시간: 30분
-- 생성시각이 있는 링크 중 30% 이상이 30분 이상 오래됨 → `DELAYED`
-- 그 외 → `NORMAL`
-
-따라서 일부 최신 링크 하나가 다수의 오래된 링크를 가리는 문제를 줄였습니다.
-
-`sourceUpdatedAt`은 참고용으로 가장 최신 ITS 생성시각을 유지합니다.
-
-## 11. 입력 검증
-
-`/api/ingest`는 Pydantic 모델로 다음을 검증합니다.
-
-- 도로명은 `달구벌대로`로 고정
-- 속도는 0 초과 200 km/h 이하
-- `minSpeed <= averageSpeed <= maxSpeed`
-- 링크 수는 1 이상
-- `sourceStatus`는 `NORMAL` 또는 `DELAYED`
-- 날짜와 한국시간 기준 `capturedAt` 날짜 일치
-- timezone 없는 시각 입력 거부
-- 정의되지 않은 추가 필드 거부
-
-## 12. 기록 수 표시
-
-대시보드 차트는 최근 기록만 가져오지만, `쌓인 기록`은 별도 `COUNT(*)`를 사용해 DB의 실제 전체 날짜 수를 표시합니다.
-
-## 13. API
-
-```text
-GET  /api/health      설정 상태
-GET  /api/dashboard   메인 화면 데이터
-GET  /api/history     최근 30개 기록 + 전체 기록일 수
-GET  /api/verify      제출 조건 검증용 읽기 전용 증거 API
-GET  /api/check-missed 10:00 KST 누락 점검 (Vercel Cron 전용)
-POST /api/ingest      로컬 수집 성공값 수신 (인증 필요)
-POST /api/attempt     로컬 수집 실패 이력 수신 (인증 필요)
-```
-
-직접 ITS를 호출하던 `/api/collect`, 공개 TCP 진단용 `/api/test-tcp`는 제거했습니다.
-
-## 14. 데이터 계산 방식
-
-ITS 대구 영역 응답에서 `roadName`에 `달구벌대로`가 포함되고 속도가 0 초과 200 km/h 이하인 링크만 사용합니다.
-
-현재 대표값은 유효 링크 속도의 **산술평균**입니다.
-
-```text
-평균 = 유효 링크 speed 합 / 유효 링크 수
-```
-
-과제에서 “달구벌대로 링크들의 평균속도”를 기록하는 목적에 맞춘 방식입니다. 향후 링크 길이 데이터가 확보되면 주행시간 기반 가중평균으로 발전시킬 수 있습니다.
-
-## 15. 테스트
-
-공통 교통 데이터 처리 로직 테스트:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-테스트에는 다음이 포함됩니다.
-
-- 다른 도로/비정상 속도 제외
-- 지연 링크 비율 판정
-- 최신 링크 하나가 다수의 오래된 링크를 정상으로 오판하지 않는지 확인
-
-## 보안
-
-- 실제 API Key / DB URL / 비밀값을 GitHub에 커밋하지 마세요.
-- `.env`, `collector.env` 등은 `.gitignore`에 포함되어 있습니다.
-- 서버 내부 예외 상세는 공개 API 응답으로 그대로 반환하지 않고 Vercel 로그에만 남깁니다.
-
-
-## 16. 제출 검증 화면
-
-배포 후 다음 주소에서 제출 조건을 한 번에 확인할 수 있습니다.
-
-```text
-https://YOUR_PROJECT.vercel.app/verify
-```
-
-검증 화면은 다음 다섯 항목을 표시합니다.
-
-1. **실제 공개 원천의 값과 맥락**: 국가교통정보센터 ITS, 달구벌대로, 최신 실제 집계값, 실제 링크 샘플 최대 5건
-2. **외부 실패 5종 합성 재생**: `TIMEOUT`, `HTTP_ERROR`, `INVALID_JSON`, `EMPTY_DATA`, `STALE_DATA`
-3. **마지막 정상값과 일별 기록 보존**: 실패를 0 km/h로 저장하지 않고 기존 NORMAL을 유지
-4. **KST 전날 대비**: 오늘과 달력상 전날 실제 기록 2건이 모두 있을 때만 변화값 계산
-5. **비밀값 비노출**: `ITS_API_KEY`, `INGEST_SECRET`, `CRON_SECRET`, `DATABASE_URL`, Authorization 헤더를 검증 응답에 포함하지 않음
-
-합성 실패 재생은 **메모리에서만 실행되며 DB를 변경하지 않습니다.**
-
-### 원천 샘플
-
-`collect_local.py`가 실제 ITS 응답에서 달구벌대로 유효 링크를 추린 뒤, 순서상 균등 간격으로 최대 5건을 `traffic_source_samples`에 저장합니다. API 키는 저장하지 않습니다.
-
-기존 DB를 사용 중이라면 업데이트된 `schema.sql`을 Neon SQL Editor에서 다시 한 번 실행해야 `failure_type` 컬럼과 `traffic_source_samples` 테이블이 추가됩니다. 기존 `traffic_daily` 데이터는 삭제되지 않습니다.
-
-
-## 17. PC가 꺼져 있을 때의 동작
-
-09:00에 로컬 PC가 꺼져 있으면 수집기 자체가 실행되지 않으므로 ITS 요청과 `/api/attempt` 보고가 모두 없습니다. 10:00 KST의 Vercel Cron이 이를 확인해 `collection_attempts.status = MISSED`를 기록합니다. 이후 PC를 켜 11:00에 수동 실행하더라도 `collect_local.py`와 서버가 09:00~09:09 이외의 공식 저장을 거부하므로, 11:00 현재값이 09:00 데이터로 위장되어 저장되지 않습니다.
+이 프로젝트는 **매일 동일한 시점의 실제 교통 데이터를 신뢰성 있게 축적하고,  
+수집 실패·누락까지 구분하여 기록하는 것**을 핵심 목표로 합니다.
