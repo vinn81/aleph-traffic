@@ -161,6 +161,7 @@ button,a{font-family:inherit}
   display:inline-flex;
   align-items:center;
   gap:8px;
+  max-width:100%;
   padding:8px 13px;
   font-size:12px;
   font-weight:600;
@@ -168,6 +169,7 @@ button,a{font-family:inherit}
   background:#F7F9F8;
   color:var(--muted);
 }
+.pill span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pill i{
   width:7px;height:7px;border-radius:50%;
   background:var(--faint);box-shadow:0 0 0 4px rgba(154,166,161,.12);flex:none;
@@ -188,6 +190,14 @@ button,a{font-family:inherit}
 }
 .reload:hover{transform:translateY(-1px);border-color:var(--line-2);background:#FCFDFC;box-shadow:0 7px 18px rgba(24,47,39,.075)}
 .reload:focus-visible{outline:3px solid rgba(29,139,102,.18);outline-offset:2px}
+.reload[disabled]{cursor:progress;color:var(--muted);background:#F7F9F8;transform:none;box-shadow:none}
+.reload[disabled]:hover{border-color:var(--line);background:#F7F9F8;transform:none;box-shadow:none}
+.reload-spinner{
+  display:none;width:13px;height:13px;flex:none;border:2px solid rgba(102,121,113,.28);
+  border-top-color:currentColor;border-radius:50%;animation:reload-spin .8s linear infinite
+}
+.reload.is-loading .reload-spinner{display:inline-block}
+@keyframes reload-spin{to{transform:rotate(360deg)}}
 
 /* ---------- hero ---------- */
 
@@ -248,7 +258,7 @@ button,a{font-family:inherit}
 .band-legend span:last-child::before{background:var(--lane)}
 
 /* ---------- notice ---------- */
-.notice{margin-top:12px;padding:13px 16px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.88);color:var(--ink);font-size:12.5px;box-shadow:var(--shadow-soft)}
+.notice{margin-top:12px;padding:13px 16px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.88);color:var(--ink);font-size:12.5px;word-break:keep-all;overflow-wrap:anywhere;hyphens:auto;box-shadow:var(--shadow-soft)}
 .notice.is-delayed{background:var(--slow-soft);border-color:#EAD5A5;color:#946618}
 .notice.is-error{background:var(--jam-soft);border-color:#E7B9B4;color:#A33E36}
 
@@ -312,6 +322,10 @@ button,a{font-family:inherit}
   background:#F6F9F7;
 }
 .range-toggle button{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
   min-width:72px;
   height:32px;
   padding:0 11px;
@@ -324,12 +338,15 @@ button,a{font-family:inherit}
   cursor:pointer;
   transition:background .15s ease,color .15s ease,box-shadow .15s ease;
 }
-.range-toggle button:hover{color:var(--ink)}
+.range-toggle button::before{content:"";width:5px;height:5px;flex:none;border-radius:50%;background:currentColor;opacity:.22}
+.range-toggle button:hover{background:rgba(255,255,255,.68);color:var(--ink)}
+.range-toggle button:focus-visible{outline:3px solid rgba(29,139,102,.18);outline-offset:1px}
 .range-toggle button.is-active{
-  background:#fff;
-  color:var(--flow);
-  box-shadow:0 2px 8px rgba(24,47,39,.08);
+  background:linear-gradient(180deg,var(--flow-2),var(--flow));
+  color:#fff;
+  box-shadow:0 4px 12px rgba(29,139,102,.26),inset 0 0 0 1px rgba(255,255,255,.2);
 }
+.range-toggle button.is-active::before{background:#fff;opacity:1}
 
 #chartHost{
   position:relative;min-height:300px;overflow:hidden;padding:14px 8px 0;border:1px solid #E4EBE7;border-radius:15px;
@@ -351,16 +368,22 @@ button,a{font-family:inherit}
 .chart .hitbox{fill:transparent;cursor:pointer}
 
 .chart-tooltip{
-  position:absolute;z-index:5;display:none;min-width:220px;max-width:280px;padding:13px 14px;
+  position:absolute;z-index:5;display:none;min-width:246px;max-width:280px;padding:13px 14px;
   border:1px solid var(--line-2);border-radius:13px;background:rgba(255,255,255,.97);
-  box-shadow:0 14px 34px rgba(18,43,35,.15);pointer-events:none;
+  box-shadow:0 14px 34px rgba(18,43,35,.15);font-variant-numeric:tabular-nums;pointer-events:none;
 }
 .chart-tooltip.is-open{display:block}
-.chart-tooltip strong{display:block;margin-bottom:8px;font-size:13px}
-.chart-tooltip dl{display:grid;grid-template-columns:1fr auto;gap:5px 14px;margin:0;font-size:11.5px}
+.chart-tooltip strong{display:block;margin-bottom:4px;padding-bottom:8px;border-bottom:1px solid var(--line);font-size:13px}
+.chart-tooltip dl{display:grid;grid-template-columns:1fr auto;gap:0 14px;margin:0;font-size:12px}
+.chart-tooltip dt,.chart-tooltip dd{padding:4px 0;border-bottom:1px solid rgba(215,225,220,.65)}
 .chart-tooltip dt{color:var(--muted)}
 .chart-tooltip dd{margin:0;font-weight:600;text-align:right}
-.chart-tooltip .tip-status{margin-top:8px;padding-top:8px;border-top:1px solid var(--line);font-size:10.5px;color:var(--muted)}
+.chart-tooltip dt:nth-last-of-type(1),.chart-tooltip dd:nth-last-of-type(1){border-bottom:0}
+.chart-tooltip .tip-lead{font-weight:800}
+.chart-tooltip .tip-up{color:var(--flow)}
+.chart-tooltip .tip-down{color:var(--jam)}
+.chart-tooltip .tip-none{color:var(--faint)}
+.chart-tooltip .tip-status{display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line);font-size:10.5px;color:var(--muted)}
 
 .log-head{
   display:grid;grid-template-columns:1.25fr .8fr .8fr .8fr .8fr 1fr .9fr;
@@ -388,11 +411,14 @@ button,a{font-family:inherit}
   border-radius:999px;background:var(--flow-soft);color:var(--flow);font-size:9.5px;font-weight:700;
 }
 .status-badge{
-  display:inline-flex;align-items:center;justify-content:center;width:max-content;min-width:63px;padding:3px 8px;border-radius:999px;
-  border:1px solid var(--line);font-size:9.5px;font-weight:700;background:#F7F9F8;color:var(--muted);
+  display:inline-flex;align-items:center;justify-content:center;gap:5px;width:max-content;min-width:70px;min-height:21px;padding:3px 8px;border-radius:999px;
+  border:1px solid var(--line);font-size:9.5px;font-weight:700;letter-spacing:.05em;white-space:nowrap;background:#F7F9F8;color:var(--muted);
 }
+.status-badge::before{content:"";width:5px;height:5px;flex:none;border-radius:50%;background:currentColor}
 .status-badge.normal{background:var(--flow-soft);border-color:#C9E7DB;color:var(--flow)}
 .status-badge.delayed{background:var(--slow-soft);border-color:#EBD9B3;color:var(--slow)}
+.status-badge.error,.status-badge.missed{background:var(--jam-soft);border-color:#E7B9B4;color:var(--jam)}
+.status-badge.waiting{background:#F2F5F3;border-color:#D7E0DC;color:var(--muted)}
 
 
 /* ---------- record integrity ---------- */
@@ -431,6 +457,12 @@ button,a{font-family:inherit}
 .checks li::after{content:"";position:absolute;left:5px;top:17px;width:6px;height:3px;border-left:1.5px solid white;border-bottom:1.5px solid white;transform:rotate(-45deg)}
 .checks b{color:var(--ink);font-weight:700}
 
+/* ---------- overflow guards ---------- */
+.fact,.trend-mini,.integrity-value,.integrity-card,.panel,.notes .panel,.log li>*{min-width:0}
+.fact dd,.trend-mini b,.integrity-value strong,.integrity-note,.road-when,#howText,.notes p,.panel p.lede,.log .d,.log .t{word-break:keep-all;overflow-wrap:anywhere}
+.road-when{max-width:100%;white-space:normal;text-align:left}
+.chart-tooltip strong,.chart-tooltip dd{word-break:keep-all;overflow-wrap:anywhere}
+
 .foot{position:relative;margin-top:26px;padding-top:18px;text-align:center;font-size:11px;color:var(--faint)}
 .foot::before{content:"";position:absolute;top:0;left:50%;width:54px;height:1px;transform:translateX(-50%);background:var(--line-2)}
 .empty{padding:48px 0;text-align:center;font-size:13px;color:var(--muted)}
@@ -456,26 +488,37 @@ button,a{font-family:inherit}
   .readout em{padding-bottom:6px}
   .band-wrap{margin-top:30px;padding:17px 13px 11px}
   .band-legend span:last-child{margin-left:0}
-  .facts{gap:9px;margin-top:10px}
+  .notice{margin-top:12px}
+  .facts{gap:10px;margin-top:12px}
   .fact{min-height:102px;padding:16px}
   .fact dd{font-size:20px}
-  .panel{padding:23px 19px;border-radius:17px}
-  .panel::before{left:19px}
-  .trend-summary{grid-template-columns:1fr 1fr}
-  #chartHost{min-height:260px;overflow-x:auto}
+  .panel{margin-top:12px;padding:22px 18px;border-radius:17px}
+  .panel::before{left:18px}
+  .trend-head{gap:12px}
+  .trend-summary{grid-template-columns:1fr 1fr;gap:8px;margin:14px 0 12px}
+  #chartHost{min-height:250px;padding:12px 6px 0;overflow-x:auto}
+  .log-head{gap:12px;margin-top:12px}
   .chart{min-width:660px}
+  .chart.is-compact{min-width:0}
   .chart-tooltip{position:fixed;left:14px!important;right:14px;top:auto!important;bottom:14px;max-width:none}
   .log li{grid-template-columns:1fr 1fr}
   .log .d{grid-column:1/-1}
+  .integrity-grid{gap:12px;margin-top:12px}
+  .integrity-card{padding:20px 18px}
+  .notes{gap:12px;margin-top:12px}
+  .foot{margin-top:20px}
 }
 @media(max-width:410px){
   .facts{grid-template-columns:1fr}
   .masthead-side .reload{flex:1}
   .trend-summary{grid-template-columns:1fr}
+  .range-toggle{width:100%}
+  .range-toggle button{flex:1;min-width:0}
 }
 @media(prefers-reduced-motion:reduce){
   *{scroll-behavior:auto!important}
   .spread,.needle,.reload,.fact,.log li{transition:none}
+  .reload-spinner{animation-duration:1.6s}
 }
 </style>
 </head>
@@ -488,7 +531,10 @@ button,a{font-family:inherit}
     </h1>
     <div class="masthead-side">
       <span class="pill" id="pill"><i></i><span id="pillText">불러오는 중</span></span>
-      <button class="reload" id="reload" type="button">새로고침</button>
+      <button class="reload" id="reload" type="button" aria-live="polite">
+        <span class="reload-spinner" aria-hidden="true"></span>
+        <span id="reloadText">새로고침</span>
+      </button>
     </div>
   </header>
 
@@ -854,10 +900,14 @@ function paintChart(history){
   rows.forEach(function(r){ if (r.maxSpeed && r.maxSpeed > top) top = Math.ceil(r.maxSpeed/10)*10; });
   function y(v){ return padT + innerH - (Number(v)/top)*innerH; }
   var slot = innerW / rows.length;
+  var MAX_SLOT = 108;
+  if (slot > MAX_SLOT) slot = MAX_SLOT;
+  var groupW = slot * rows.length;
+  var originX = padL + Math.max(0, (innerW - groupW) / 2);
 
   var svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
   svg.setAttribute("viewBox","0 0 "+W+" "+H);
-  svg.setAttribute("class","chart");
+  svg.setAttribute("class","chart" + (rows.length <= 5 ? " is-compact" : ""));
   svg.setAttribute("role","img");
   svg.setAttribute("aria-label","날짜별 통행속도 범위 차트");
 
@@ -878,33 +928,36 @@ function paintChart(history){
     var delta = exactPrevDelta(r,byDate);
     var range = (r.minSpeed!=null && r.maxSpeed!=null) ? Number(r.maxSpeed)-Number(r.minSpeed) : null;
     var g = grade(r.averageSpeed);
+    var deltaClass = delta===null ? "tip-none" : delta>0 ? "tip-up" : delta<0 ? "tip-down" : "tip-none";
+    var statusClass = r.sourceStatus==="DELAYED" ? "delayed" : "normal";
     tooltip.innerHTML =
       "<strong>"+r.date+" ("+weekday(r.date)+")</strong>"+
       "<dl>"+
-        "<dt>평균</dt><dd>"+num(r.averageSpeed)+" km/h · "+(g?g.label:"--")+"</dd>"+
-        "<dt>최저</dt><dd>"+num(r.minSpeed)+" km/h</dd>"+
-        "<dt>최고</dt><dd>"+num(r.maxSpeed)+" km/h</dd>"+
+        "<dt>평균</dt><dd class='tip-lead' style='color:"+(g?g.color:"inherit")+"'>"+num(r.averageSpeed)+" km/h · "+(g?g.label:"--")+"</dd>"+
+        "<dt>최저 / 최고</dt><dd>"+num(r.minSpeed)+" / "+num(r.maxSpeed)+" km/h</dd>"+
         "<dt>구간 편차</dt><dd>"+num(range)+" km/h</dd>"+
-        "<dt>전날 대비</dt><dd>"+(delta===null?"비교 불가":((delta>0?"+":"")+num(delta)+" km/h"))+"</dd>"+
+        "<dt>전날 대비</dt><dd class='"+deltaClass+"'>"+(delta===null?"비교 불가":((delta>0?"+":"")+num(delta)+" km/h"))+"</dd>"+
         "<dt>측정 링크</dt><dd>"+(r.linkCount==null?"--":r.linkCount+"개")+"</dd>"+
         "<dt>수집 시각</dt><dd>"+clock(r.capturedAt)+" KST</dd>"+
         "<dt>ITS 최신</dt><dd>"+clock(r.sourceUpdatedAt)+" KST</dd>"+
       "</dl>"+
-      "<div class='tip-status'>원천 상태 · "+statusLabel(r.sourceStatus)+"</div>";
+      "<div class='tip-status'>원천 상태 <span class='status-badge "+statusClass+"'>"+statusLabel(r.sourceStatus)+"</span></div>";
     tooltip.classList.add("is-open");
 
     var rect = host.getBoundingClientRect();
     var left = clientX ? clientX-rect.left+12 : (cx/W)*rect.width+8;
     var topPos = clientY ? clientY-rect.top-20 : 22;
-    left = Math.max(8,Math.min(left,rect.width-245));
-    topPos = Math.max(8,Math.min(topPos,rect.height-210));
+    var tipW = tooltip.offsetWidth || 260;
+    var tipH = tooltip.offsetHeight || 220;
+    left = Math.max(8,Math.min(left,Math.max(8,rect.width-tipW-8)));
+    topPos = Math.max(8,Math.min(topPos,Math.max(8,rect.height-tipH-8)));
     tooltip.style.left = left+"px";
     tooltip.style.top = topPos+"px";
   }
   function hideTip(){ tooltip.classList.remove("is-open"); }
 
   rows.forEach(function(r,i){
-    var cx = padL + slot*i + slot/2;
+    var cx = originX + slot*i + slot/2;
     var lo = r.minSpeed==null ? r.averageSpeed : r.minSpeed;
     var hi = r.maxSpeed==null ? r.averageSpeed : r.maxSpeed;
     var g = grade(r.averageSpeed);
@@ -932,7 +985,7 @@ function paintChart(history){
       add("text",{x:cx,y:H-13,"text-anchor":"middle",class:"day-text"},ymd(r.date));
     }
 
-    var hit = add("rect",{x:padL+slot*i,y:padT,width:slot,height:innerH+28,class:"hitbox"});
+    var hit = add("rect",{x:originX+slot*i,y:padT,width:slot,height:innerH+28,class:"hitbox"});
     hit.addEventListener("mouseenter",function(e){showTip(r,cx,e.clientX,e.clientY)});
     hit.addEventListener("mousemove",function(e){showTip(r,cx,e.clientX,e.clientY)});
     hit.addEventListener("mouseleave",hideTip);
@@ -1026,8 +1079,8 @@ function paintIntegrity(data){
     diffEl.textContent = "비교 불가";
   }
 
-  if (cmp && cmp.percentChange !== null && cmp.percentChange !== undefined){
-    var p = Number(cmp.percentChange);
+  if (cmp && cmp.differencePercent !== null && cmp.differencePercent !== undefined){
+    var p = Number(cmp.differencePercent);
     pctEl.textContent = (p > 0 ? "+" : "") + num(p) + "%";
     if (p > 0) pctEl.style.color = "var(--flow)";
     if (p < 0) pctEl.style.color = "var(--jam)";
@@ -1073,7 +1126,20 @@ function showFailure(text){
   paintNotice("ERROR",text);
   document.getElementById("roadWhen").textContent = "새로고침을 눌러 다시 시도할 수 있습니다.";
 }
+var IS_LOADING = false;
+function setLoading(on){
+  IS_LOADING = on;
+  var btn = document.getElementById("reload");
+  var label = document.getElementById("reloadText");
+  if (!btn) return;
+  btn.classList.toggle("is-loading",on);
+  btn.disabled = on;
+  btn.setAttribute("aria-busy",on ? "true" : "false");
+  if (label) label.textContent = on ? "불러오는 중" : "새로고침";
+}
 async function load(){
+  if (IS_LOADING) return;
+  setLoading(true);
   paintPill("","불러오는 중");
   try{
     var res = await fetch("/api/dashboard",{cache:"no-store"});
@@ -1085,6 +1151,8 @@ async function load(){
     paintAll(data);
   }catch(err){
     showFailure("서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+  }finally{
+    setLoading(false);
   }
 }
 document.getElementById("reload").addEventListener("click",load);
