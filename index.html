@@ -394,6 +394,30 @@ button,a{font-family:inherit}
 .status-badge.normal{background:var(--flow-soft);border-color:#C9E7DB;color:var(--flow)}
 .status-badge.delayed{background:var(--slow-soft);border-color:#EBD9B3;color:var(--slow)}
 
+
+/* ---------- record integrity ---------- */
+.integrity-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+.integrity-card{
+  position:relative;padding:23px;border:1px solid var(--line);border-radius:18px;
+  background:linear-gradient(180deg,#fff,#F9FBFA);box-shadow:var(--shadow-soft)
+}
+.integrity-card::before{
+  content:"";position:absolute;left:23px;top:0;width:42px;height:3px;border-radius:0 0 999px 999px;
+  background:linear-gradient(90deg,var(--flow),var(--flow-2))
+}
+.integrity-card h3{margin:0 0 5px;font-size:14px;letter-spacing:-.02em}
+.integrity-card .desc{margin:0 0 15px;font-size:11.5px;color:var(--muted)}
+.integrity-values{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.integrity-value{min-height:67px;padding:11px 12px;border:1px solid #E1E8E5;border-radius:12px;background:#F8FAF9}
+.integrity-value span{display:block;margin-bottom:5px;font-size:10px;color:var(--muted)}
+.integrity-value strong{display:block;font-size:13px;line-height:1.45}
+.integrity-note{
+  margin:10px 0 0;padding:11px 12px;border:1px solid #E1E8E5;border-radius:12px;
+  background:#F6F9F7;font-size:10.5px;color:var(--muted)
+}
+@media(max-width:760px){.integrity-grid{grid-template-columns:1fr}}
+@media(max-width:430px){.integrity-values{grid-template-columns:1fr}}
+
 /* ---------- bottom cards ---------- */
 .notes{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;margin-top:16px}
 .notes .panel{min-height:100%;margin-top:0}
@@ -464,7 +488,6 @@ button,a{font-family:inherit}
     </h1>
     <div class="masthead-side">
       <span class="pill" id="pill"><i></i><span id="pillText">불러오는 중</span></span>
-      <a class="reload" href="/verify">검증 보기</a>
       <button class="reload" id="reload" type="button">새로고침</button>
     </div>
   </header>
@@ -538,6 +561,48 @@ button,a{font-family:inherit}
     </div>
     <ul class="log" id="log"></ul>
   </section>
+
+  <div class="integrity-grid">
+    <section class="integrity-card">
+      <h3>마지막 정상값 일별 기록 보존</h3>
+      <p class="desc">실패는 0 km/h로 저장하지 않고, 공식 일별 기록과 수집 시도를 분리합니다.</p>
+      <div class="integrity-values">
+        <div class="integrity-value">
+          <span>마지막 NORMAL</span>
+          <strong id="integrityNormal">--</strong>
+        </div>
+        <div class="integrity-value">
+          <span>전체 일별 기록</span>
+          <strong id="integrityDays">--</strong>
+        </div>
+      </div>
+      <p class="integrity-note">실패는 traffic_daily에 0으로 저장하지 않으며, 기존 NORMAL은 DELAYED 재수집으로 덮어쓰지 않습니다.</p>
+    </section>
+
+    <section class="integrity-card">
+      <h3>KST 전날 대비 실제 기록</h3>
+      <p class="desc">오늘과 달력상 정확한 전날만 비교합니다. 전날이 없으면 다른 날짜로 대체하지 않습니다.</p>
+      <div class="integrity-values">
+        <div class="integrity-value">
+          <span>오늘</span>
+          <strong id="integrityToday">--</strong>
+        </div>
+        <div class="integrity-value">
+          <span>전날</span>
+          <strong id="integrityYesterday">--</strong>
+        </div>
+        <div class="integrity-value">
+          <span>변화량</span>
+          <strong id="integrityDiff">--</strong>
+        </div>
+        <div class="integrity-value">
+          <span>변화율</span>
+          <strong id="integrityPercent">--</strong>
+        </div>
+      </div>
+      <p class="integrity-note">KST 달력상 전날만 비교하며 다른 과거 날짜로 대체하지 않습니다.</p>
+    </section>
+  </div>
 
   <div class="notes">
     <section class="panel" style="margin-top:0">
@@ -928,6 +993,49 @@ function paintLog(history,todayDate){
   });
 }
 
+function paintIntegrity(data){
+  var history = data.history || [];
+  var normal = history.find(function(r){ return r.sourceStatus === "NORMAL"; }) || null;
+
+  document.getElementById("integrityNormal").textContent =
+    normal ? normal.date+" · "+num(normal.averageSpeed)+" km/h" : "기록 없음";
+  document.getElementById("integrityDays").textContent =
+    (data.historyDays == null ? history.length : data.historyDays)+"일";
+
+  var today = data.todayRecord || null;
+  var yesterday = data.yesterdayRecord || null;
+
+  document.getElementById("integrityToday").textContent =
+    today ? today.date+" · "+num(today.averageSpeed)+" km/h" : "기록 없음";
+  document.getElementById("integrityYesterday").textContent =
+    yesterday ? yesterday.date+" · "+num(yesterday.averageSpeed)+" km/h" : "기록 없음";
+
+  var cmp = data.comparison || null;
+  var diffEl = document.getElementById("integrityDiff");
+  var pctEl = document.getElementById("integrityPercent");
+
+  diffEl.style.color = "";
+  pctEl.style.color = "";
+
+  if (cmp && cmp.differenceKmh !== null && cmp.differenceKmh !== undefined){
+    var d = Number(cmp.differenceKmh);
+    diffEl.textContent = (d > 0 ? "+" : "") + num(d) + " km/h";
+    if (d > 0) diffEl.style.color = "var(--flow)";
+    if (d < 0) diffEl.style.color = "var(--jam)";
+  } else {
+    diffEl.textContent = "비교 불가";
+  }
+
+  if (cmp && cmp.percentChange !== null && cmp.percentChange !== undefined){
+    var p = Number(cmp.percentChange);
+    pctEl.textContent = (p > 0 ? "+" : "") + num(p) + "%";
+    if (p > 0) pctEl.style.color = "var(--flow)";
+    if (p < 0) pctEl.style.color = "var(--jam)";
+  } else {
+    pctEl.textContent = "비교 불가";
+  }
+}
+
 /* ---------- load ---------- */
 function paintHow(data){
   var rec = data.shownRecord;
@@ -955,6 +1063,7 @@ function paintAll(data){
   paintTrendSummary(trendRows);
   paintChart(trendRows);
   paintLog(trendRows,data.todayRecord?data.todayRecord.date:null);
+  paintIntegrity(data);
   paintHow(data);
   document.getElementById("foot").textContent = "서버 시각 "+clock(data.serverTime)+" · 예정 수집 시각 "+data.expectedCollectTimeKST;
 }
