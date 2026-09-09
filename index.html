@@ -301,6 +301,36 @@ button,a{font-family:inherit}
 .trend-mini b{font-size:16px;letter-spacing:-.02em}
 .trend-mini small{font-size:10.5px;color:var(--muted);font-weight:500;margin-left:3px}
 
+
+.range-toggle{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  padding:4px;
+  border:1px solid var(--line);
+  border-radius:11px;
+  background:#F6F9F7;
+}
+.range-toggle button{
+  min-width:72px;
+  height:32px;
+  padding:0 11px;
+  border:0;
+  border-radius:8px;
+  background:transparent;
+  color:var(--muted);
+  font-size:11px;
+  font-weight:700;
+  cursor:pointer;
+  transition:background .15s ease,color .15s ease,box-shadow .15s ease;
+}
+.range-toggle button:hover{color:var(--ink)}
+.range-toggle button.is-active{
+  background:#fff;
+  color:var(--flow);
+  box-shadow:0 2px 8px rgba(24,47,39,.08);
+}
+
 #chartHost{
   position:relative;min-height:300px;overflow:hidden;padding:14px 8px 0;border:1px solid #E4EBE7;border-radius:15px;
   background:
@@ -477,11 +507,17 @@ button,a{font-family:inherit}
     <div class="trend-head">
       <div>
         <h2>일별 속도 추이</h2>
-        <p class="lede">초록 막대는 날짜별 평균속도이고, 얇은 선과 위·아래 점은 해당 날짜의 최저~최고 속도 범위입니다. 각 날짜에 마우스를 올리면 수집 시각·링크 수·원천 갱신 시각·전날 대비를 함께 볼 수 있습니다.</p>
+        <p class="lede">초록 막대는 날짜별 평균속도이고, 얇은 선과 위·아래 점은 해당 날짜의 최저~최고 속도 범위입니다. 기본은 최근 7일이며, 최근 30일까지 전환해서 볼 수 있습니다.</p>
       </div>
-      <div class="legend" aria-label="차트 범례">
-        <span><i class="avg-key"></i>평균</span>
-        <span><i class="range-key"></i>최저~최고</span>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end">
+        <div class="range-toggle" aria-label="차트 조회 기간">
+          <button type="button" id="range7" class="is-active" aria-pressed="true">최근 7일</button>
+          <button type="button" id="range30" aria-pressed="false">최근 30일</button>
+        </div>
+        <div class="legend" aria-label="차트 범례">
+          <span><i class="avg-key"></i>평균</span>
+          <span><i class="range-key"></i>최저~최고</span>
+        </div>
       </div>
     </div>
 
@@ -532,6 +568,8 @@ button,a{font-family:inherit}
 var SCALE_MAX = 60;
 var Z_JAM = 15;
 var Z_SLOW = 25;
+var TREND_RANGE_DAYS = 7;
+var DASHBOARD_DATA = null;
 
 function pct(v){ return Math.max(0, Math.min(100, (v / SCALE_MAX) * 100)); }
 function num(v, digits){
@@ -575,6 +613,29 @@ function exactPrevDelta(row, map){
   if (!prev) return null;
   return Number(row.averageSpeed) - Number(prev.averageSpeed);
 }
+function trendHistory(history){
+  if (!history || !history.length) return [];
+  return history.slice(0, TREND_RANGE_DAYS);
+}
+function setRangeButtons(){
+  var b7 = document.getElementById("range7");
+  var b30 = document.getElementById("range30");
+  if (!b7 || !b30) return;
+  var seven = TREND_RANGE_DAYS === 7;
+  b7.classList.toggle("is-active", seven);
+  b30.classList.toggle("is-active", !seven);
+  b7.setAttribute("aria-pressed", seven ? "true" : "false");
+  b30.setAttribute("aria-pressed", seven ? "false" : "true");
+}
+function repaintTrendOnly(){
+  if (!DASHBOARD_DATA) return;
+  var h = trendHistory(DASHBOARD_DATA.history);
+  setRangeButtons();
+  paintTrendSummary(h);
+  paintChart(h);
+  paintLog(h, DASHBOARD_DATA.todayRecord ? DASHBOARD_DATA.todayRecord.date : null);
+}
+
 function statusLabel(s){
   return s === "DELAYED" ? "DELAYED" : "NORMAL";
 }
@@ -801,7 +862,10 @@ function paintChart(history){
       class:"avgbar"
     });
     add("text",{x:cx,y:avgY-10,"text-anchor":"middle",class:"avg-text"},num(r.averageSpeed));
-    add("text",{x:cx,y:H-13,"text-anchor":"middle",class:"day-text"},ymd(r.date));
+    var labelEvery = rows.length > 14 ? 5 : (rows.length > 8 ? 2 : 1);
+    if (i % labelEvery === 0 || i === rows.length-1){
+      add("text",{x:cx,y:H-13,"text-anchor":"middle",class:"day-text"},ymd(r.date));
+    }
 
     var hit = add("rect",{x:padL+slot*i,y:padT,width:slot,height:innerH+28,class:"hitbox"});
     hit.addEventListener("mouseenter",function(e){showTip(r,cx,e.clientX,e.clientY)});
@@ -883,11 +947,14 @@ function paintAll(data){
     :data.status==="MISSED"?"09:00 수집 누락"
     :"확인 필요");
   paintNotice(data.status,data.message);
+  DASHBOARD_DATA = data;
   paintHero(data);
   paintFacts(data);
-  paintTrendSummary(data.history);
-  paintChart(data.history);
-  paintLog(data.history,data.todayRecord?data.todayRecord.date:null);
+  var trendRows = trendHistory(data.history);
+  setRangeButtons();
+  paintTrendSummary(trendRows);
+  paintChart(trendRows);
+  paintLog(trendRows,data.todayRecord?data.todayRecord.date:null);
   paintHow(data);
   document.getElementById("foot").textContent = "서버 시각 "+clock(data.serverTime)+" · 예정 수집 시각 "+data.expectedCollectTimeKST;
 }
@@ -912,6 +979,14 @@ async function load(){
   }
 }
 document.getElementById("reload").addEventListener("click",load);
+document.getElementById("range7").addEventListener("click",function(){
+  TREND_RANGE_DAYS = 7;
+  repaintTrendOnly();
+});
+document.getElementById("range30").addEventListener("click",function(){
+  TREND_RANGE_DAYS = 30;
+  repaintTrendOnly();
+});
 load();
 </script>
 </body>
